@@ -6,11 +6,23 @@
     <script src="https://vega.github.io/vega-editor/vendor/topojson.js"></script>
     <script src="https://vega.github.io/vega-editor/vendor/d3.layout.cloud.js"></script>
     <script src="vega.js" charset="utf-8"></script>
+    <style>
+    body {
+      font-family: Helvetica, Arial, sans-serif;
+    }
+    </style>
   </head>
   <body>
     <div>
-      Experimental WebGL renderer for Vega (above), compared with 2DCanvas (below)&nbsp;
-      <a href="https://github.com/jeffbaumes/vega-webgl">GitHub</a>&nbsp;
+      <h3>
+        Experimental WebGL renderer for Vega (above), compared with 2DCanvas (below)
+      </h3>
+      <div>
+        <a href="https://github.com/jeffbaumes/vega-webgl">Code</a>
+        by <a href="https://twitter.com/jeffbaumes">Jeff</a>
+        at <a href="http://www.kitware.com/">Kitware</a>.
+        Funded by DARPA/AFRL XDATA.
+      </div>
       <select id="spec">
         <option value="airports">airports</option>
         <option value="arc">arc</option>
@@ -74,7 +86,6 @@
 
 // playfair: one missing black triangle upper right
 
-// text
 // heatmap, gradient, legends: handle gradient
 // horizon: do something for group.clip
 // line dashes (barley, nested)
