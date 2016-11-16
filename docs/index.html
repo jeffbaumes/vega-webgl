@@ -73,8 +73,8 @@
         <option value="weather">weather</option>
         <option value="wordcloud">wordcloud</option>
       </select>
-      <input type="checkbox" id="rotate" checked>rotate</input>
-      <input type="checkbox" id="bounce" checked>bounce</input>
+      <input type="checkbox" id="rotate">rotate</input>
+      <input type="checkbox" id="bounce">bounce</input>
     </div>
     <div id="vis"></div>
     <div id="vis2"></div>
@@ -109,8 +109,8 @@
 var view = null;
 var start = null;
 var frameId = null;
-var bounce = true;
-var rotate = true;
+var bounce = false;
+var rotate = false;
 var animating = false;
 
 function step(timestamp) {
