@@ -24625,10 +24625,17 @@ var index$5 = function(contours, opt) {
     }
 }
 
-function geometryForPath(path, threshold) {
+var cache$1 = {};
+
+function geometryForPath(context, path, threshold) {
+  var key = path + ';' + context._tx + ';' + context._ty + ';' + context.z;
+  if (cache$1[key]) {
+    return cache$1[key];
+  }
+
   threshold = threshold || 1.0;
   if (!path) {
-    return {lines: [], triangles: {positions: [], cells: []}, closed: false};
+    return {lines: [], triangles: [], closed: false, z: 0};
   }
   // get a list of polylines/contours from svg contents
   var lines = index$4(index$2(path)), tri;
@@ -24646,10 +24653,28 @@ function geometryForPath(path, threshold) {
     console.log('Could not triangulate the following path:');
     console.log(path);
     console.log(e);
-    tri = {positions: [], cells: []}
+    tri = {positions: [], cells: []};
   }
 
-  return {lines: lines, triangles: tri, closed: path.endsWith('Z')};
+  var z = context._randomZ ? 0.25*(Math.random() - 0.5) : 0,
+      tx = context._tx + context._origin[0],
+      ty = context._ty + context._origin[1];
+
+  var triangles = [];
+  var tcl = tri.cells.length,
+      tc = tri.cells,
+      tp = tri.positions;
+  for (var ci = 0; ci < tcl; ci++) {
+    var cell = tc[ci];
+    var p1 = tp[cell[0]];
+    var p2 = tp[cell[1]];
+    var p3 = tp[cell[2]];
+    triangles.push(p1[0] + tx, p1[1] + ty, z, p2[0] + tx, p2[1] + ty, z, p3[0] + tx, p3[1] + ty, z);
+  }
+
+  var geom = {lines: lines, triangles: triangles, closed: path.endsWith('Z'), z: z};
+  cache$1[key] = geom;
+  return geom;
 }
 
 function x$3(item)     { return item.x || 0; }
@@ -24676,7 +24701,7 @@ function arc$1(context, item) {
   if (context.arc) {
     return arcShape.context(context)(item);
   }
-  return geometryForPath(arcShape.context(null)(item), 0.1);
+  return geometryForPath(context, arcShape.context(null)(item), 0.1);
 }
 
 function area$1(context, items) {
@@ -24689,15 +24714,22 @@ function area$1(context, items) {
   if (context.arc) {
     return s.context(context)(items);
   }
-  return geometryForPath(s.context(null)(items), 0.1);
+  return geometryForPath(context, s.context(null)(items), 0.1);
 }
+
+var cache = {};
 
 function shape(context, item) {
   var s = item.mark.shape || item.shape;
   if (context.arc) {
     return s.context(context)(item);
   }
-  return geometryForPath(s.context(null)(item));
+  var key = item._id;
+  if (cache[key]) {
+    return cache[key];
+  }
+  cache[key] = geometryForPath(context, s.context(null)(item), 1);
+  return cache[key];
 }
 
 function line$1(context, items) {
@@ -24707,21 +24739,21 @@ function line$1(context, items) {
   if (context.arc) {
     return s.context(context)(items);
   }
-  return geometryForPath(s.context(null)(items));
+  return geometryForPath(context, s.context(null)(items));
 }
 
 function rectangle(context, item, x, y) {
   if (context.arc) {
     return rectShape.context(context)(item, x, y);
   }
-  return geometryForPath(rectShape.context(null)(item, x, y), 0.1);
+  return geometryForPath(context, rectShape.context(null)(item, x, y), 0.1);
 }
 
 function symbol(context, item) {
   if (context.arc) {
     return symbolShape.context(context)(item);
   }
-  return geometryForPath(symbolShape.context(null)(item), 0.1);
+  return geometryForPath(context, symbolShape.context(null)(item), 0.1);
 }
 
 function boundStroke(bounds, item) {
@@ -25003,35 +25035,34 @@ function translateItem(item) {
   return translate(item.x || 0, item.y || 0);
 }
 
+var cache$2 = {};
+
 function color$2(context, item, value) {
   if (value.id) {
     // TODO: support gradients
     return [1.0, 1.0, 1.0];
   }
+  if (cache$2[value]) {
+    return cache$2[value];
+  }
   var rgb = color(value).rgb();
-  return [rgb.r / 255, rgb.g / 255, rgb.b / 255];
+  cache$2[value] = [rgb.r / 255, rgb.g / 255, rgb.b / 255];
+  return cache$2[value];
 }
 
 function fill$1(context, item, opacity, count) {
-  var i, c;
+  var i, c, tc = context._triangleColor;
   opacity *= (item.fillOpacity==null ? 1 : item.fillOpacity);
   // TODO: don't special-case 'transparent'
   if (opacity > 0 && item.fill !== 'transparent') {
+    c = color$2(context, item, item.fill);
     for (i = 0; i < count * 3; i++) {
-      c = color$2(context, item, item.fill);
-      context._triangleColor.push(c[0], c[1], c[2], opacity);
+      tc.push(c[0], c[1], c[2], opacity);
     }
     return true;
   } else {
     return false;
   }
-}
-
-function pixelsToDisplay(context, pt) {
-  return [
-    pt[0] + context._tx + context._origin[0],
-    pt[1] + context._ty + context._origin[1]
-  ];
 }
 
 var __moduleExports$10 = function numtype(num, def) {
@@ -25412,12 +25443,13 @@ function strokeGL(context, item, opacity, polylines, closed, z) {
   opacity *= (item.strokeOpacity==null ? 1 : item.strokeOpacity);
   if (opacity <= 0 || item.stroke === 'transparent') return false;
 
-  var lw = (lw = item.strokeWidth) != null ? lw : 1, lc;
+  var lw = (lw = item.strokeWidth) != null ? lw : 1,
+      lc = (lc = item.strokeCap) != null ? lc : 'butt';
   if (lw <= 0) return false;
 
   var strokeExtrude = index$6({
       thickness: lw,
-      cap: (lc = item.strokeCap) != null ? lc : 'butt',
+      cap: lc,
       join: 'miter',
       miterLimit: 10,
       closed: closed
@@ -25425,39 +25457,46 @@ function strokeGL(context, item, opacity, polylines, closed, z) {
 
   var c = color$2(context, item, item.stroke);
 
-  polylines.forEach(function(polyline) {
-    //builds a triangulated mesh from a polyline
+  for (var li = 0; li < polylines.length; li++) {
+    var polyline = polylines[li];
     var mesh = strokeExtrude.build(polyline);
-
-    mesh.cells.forEach(function (cell) {
-      var p1 = pixelsToDisplay(context, mesh.positions[cell[0]]);
-      var p2 = pixelsToDisplay(context, mesh.positions[cell[1]]);
-      var p3 = pixelsToDisplay(context, mesh.positions[cell[2]]);
-      context._triangleGeometry.push(p1[0], p1[1], z, p2[0], p2[1], z, p3[0], p3[1], z);
+    var mp = mesh.positions,
+        mc = mesh.cells,
+        mcl = mesh.cells.length,
+        tg = context._triangleGeometry,
+        tc = context._triangleColor,
+        tx = context._tx + context._origin[0],
+        ty = context._ty + context._origin[1];
+    for (var ci = 0; ci < mcl; ci++) {
+      var cell = mc[ci];
+      var p1 = mp[cell[0]];
+      var p2 = mp[cell[1]];
+      var p3 = mp[cell[2]];
+      tg.push(p1[0] + tx, p1[1] + ty, z, p2[0] + tx, p2[1] + ty, z, p3[0] + tx, p3[1] + ty, z);
       for (var i = 0; i < 3; i++) {
-        context._triangleColor.push(c[0], c[1], c[2], opacity);
+        tc.push(c[0], c[1], c[2], opacity);
       }
-    });
-  });
+    }
+  }
 
   return true;
 }
 
 function drawGeometry(geom, context, item) {
-  var opacity = item.opacity == null ? 1 : item.opacity;
-  var z = context._randomZ ? 0.25*(Math.random() - 0.5) : 0;
+  var opacity = item.opacity == null ? 1 : item.opacity,
+      tg = context._triangleGeometry;
+
   if (opacity <= 0) return;
-  if (item.fill && fill$1(context, item, opacity, geom.triangles.cells.length)) {
-    geom.triangles.cells.forEach(function (cell) {
-      var p1 = pixelsToDisplay(context, geom.triangles.positions[cell[0]]);
-      var p2 = pixelsToDisplay(context, geom.triangles.positions[cell[1]]);
-      var p3 = pixelsToDisplay(context, geom.triangles.positions[cell[2]]);
-      context._triangleGeometry.push(p1[0], p1[1], z, p2[0], p2[1], z, p3[0], p3[1], z);
-    });
+  if (item.fill && fill$1(context, item, opacity, geom.triangles.length / 9)) {
+    var tl = geom.triangles.length,
+        t = geom.triangles;
+    for (var i = 0; i < tl; i++) {
+      tg.push(t[i]);
+    }
   }
 
   if (item.stroke) {
-    strokeGL(context, item, opacity, geom.lines, geom.closed, z);
+    strokeGL(context, item, opacity, geom.lines, geom.closed, geom.z);
   }
 }
 
@@ -25486,7 +25525,6 @@ function markItemPath(type, shape) {
   function drawGL(context, scene, bounds) {
     visit(scene, function(item) {
       if (bounds && !bounds.intersects(item.bounds)) return; // bounds check
-      var geom = shape(context, item);
 
       var x = item.x || 0,
           y = item.y || 0;
@@ -25494,6 +25532,7 @@ function markItemPath(type, shape) {
       context._tx += x;
       context._ty += y;
 
+      var geom = shape(context, item);
       drawGeometry(geom, context, item);
 
       context._tx -= x;
@@ -26056,7 +26095,7 @@ function drawGL$2(context, scene, bounds) {
     var path = item.path;
     if (path == null) return true;
 
-    var geom = geometryForPath(path);
+    var geom = geometryForPath(context, path);
 
     var x = item.x || 0,
         y = item.y || 0;
@@ -26507,7 +26546,7 @@ prototype$60.canvas = function() {
 
 // retrieve the current canvas context
 prototype$60.context = function() {
-  return this._canvas.getContext('2d');
+  return this._canvas.getContext('2d') || this._canvas._textCanvas.getContext('2d');
 };
 
 // supported events
@@ -26782,188 +26821,6 @@ prototype$61.clear = function(x, y, w, h) {
   }
 };
 
-function WebGLHandler() {
-  Handler.call(this);
-  this._down = null;
-  this._touch = null;
-  this._first = true;
-}
-
-var prototype$62 = inherits$1(WebGLHandler, Handler);
-
-prototype$62.initialize = function(el, origin, obj) {
-  // add event listeners
-  var canvas = this._canvas = el && find$1(el, 'canvas');
-  if (canvas) {
-    var that = this;
-    this.events.forEach(function(type) {
-      canvas.addEventListener(type, function(evt) {
-        if (prototype$62[type]) {
-          prototype$62[type].call(that, evt);
-        } else {
-          that.fire(type, evt);
-        }
-      });
-    });
-  }
-
-  return Handler.prototype.initialize.call(this, el, origin, obj);
-};
-
-prototype$62.canvas = function() {
-  return this._canvas;
-};
-
-// retrieve the current canvas context
-prototype$62.context = function() {
-  return this._canvas.getContext('webgl') ||
-    this._canvas.getContext('experimental-webgl');
-};
-
-// supported events
-prototype$62.events = [
-  'keydown',
-  'keypress',
-  'keyup',
-  'dragenter',
-  'dragleave',
-  'dragover',
-  'mousedown',
-  'mouseup',
-  'mousemove',
-  'mouseout',
-  'mouseover',
-  'click',
-  'dblclick',
-  'wheel',
-  'mousewheel',
-  'touchstart',
-  'touchmove',
-  'touchend'
-];
-
-// to keep firefox happy
-prototype$62.DOMMouseScroll = function(evt) {
-  this.fire('mousewheel', evt);
-};
-
-function move$1(moveEvent, overEvent, outEvent) {
-  return function(evt) {
-    var a = this._active,
-        p = this.pickEvent(evt);
-
-    if (p === a) {
-      // active item and picked item are the same
-      this.fire(moveEvent, evt); // fire move
-    } else {
-      // active item and picked item are different
-      if (!a || !a.exit) {
-        // fire out for prior active item
-        // suppress if active item was removed from scene
-        this.fire(outEvent, evt);
-      }
-      this._active = p;          // set new active item
-      this.fire(overEvent, evt); // fire over for new active item
-      this.fire(moveEvent, evt); // fire move for new active item
-    }
-  };
-}
-
-function inactive$1(type) {
-  return function(evt) {
-    this.fire(type, evt);
-    this._active = null;
-  };
-}
-
-prototype$62.mousemove = move$1('mousemove', 'mouseover', 'mouseout');
-prototype$62.dragover  = move$1('dragover', 'dragenter', 'dragleave');
-
-prototype$62.mouseout  = inactive$1('mouseout');
-prototype$62.dragleave = inactive$1('dragleave');
-
-prototype$62.mousedown = function(evt) {
-  this._down = this._active;
-  this.fire('mousedown', evt);
-};
-
-prototype$62.click = function(evt) {
-  if (this._down === this._active) {
-    this.fire('click', evt);
-    this._down = null;
-  }
-};
-
-prototype$62.touchstart = function(evt) {
-  this._touch = this.pickEvent(evt.changedTouches[0]);
-
-  if (this._first) {
-    this._active = this._touch;
-    this._first = false;
-  }
-
-  this.fire('touchstart', evt, true);
-};
-
-prototype$62.touchmove = function(evt) {
-  this.fire('touchmove', evt, true);
-};
-
-prototype$62.touchend = function(evt) {
-  this.fire('touchend', evt, true);
-  this._touch = null;
-};
-
-// fire an event
-prototype$62.fire = function(type, evt, touch) {
-  var a = touch ? this._touch : this._active,
-      h = this._handlers[type], i, len;
-  if (h) {
-    evt.vegaType = type;
-    for (i=0, len=h.length; i<len; ++i) {
-      h[i].handler.call(this._obj, evt, a);
-    }
-  }
-};
-
-// add an event handler
-prototype$62.on = function(type, handler) {
-  var name = this.eventName(type),
-      h = this._handlers;
-  (h[name] || (h[name] = [])).push({
-    type: type,
-    handler: handler
-  });
-  return this;
-};
-
-// remove an event handler
-prototype$62.off = function(type, handler) {
-  var name = this.eventName(type),
-      h = this._handlers[name], i;
-  if (!h) return;
-  for (i=h.length; --i>=0;) {
-    if (h[i].type !== type) continue;
-    if (!handler || h[i].handler === handler) h.splice(i, 1);
-  }
-  return this;
-};
-
-prototype$62.pickEvent = function(evt) {
-  var p = point$6(evt, this._canvas),
-      o = this._origin;
-  return this.pick(this._scene, p[0], p[1], p[0] - o[0], p[1] - o[1]);
-};
-
-// find the scenegraph item at the current mouse position
-// x, y -- the absolute x, y mouse coordinates on the canvas element
-// gx, gy -- the relative coordinates within the current group
-prototype$62.pick = function(scene, x, y, gx, gy) {
-  var g = this.context(),
-      mark = marks[scene.marktype];
-  return mark.pickGL ? mark.pickGL.call(this, g, scene, x, y, gx, gy) : null;
-};
-
 function WebGL$1(w, h) {
   var canvas = document.createElement('canvas');
   canvas.width = w;
@@ -26975,15 +26832,12 @@ function WebGL$1(w, h) {
   gl._textCanvas.width = w;
   gl._textCanvas.height = h;
   gl._textContext = gl._textCanvas.getContext('2d');
+  canvas._textCanvas = gl._textCanvas;
 
   gl.clearColor(1.0, 1.0, 1.0, 1.0);
   gl.disable(gl.CULL_FACE);
 
   // Thanks to https://limnu.com/webgl-blending-youre-probably-wrong/
-  // gl.disable(gl.DEPTH_TEST);
-  // gl.enable(gl.BLEND);
-  // gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
-
   gl.disable(gl.DEPTH_TEST);
   gl.enable(gl.BLEND);
   gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
@@ -27188,10 +27042,10 @@ function WebGLRenderer(imageLoader) {
   this._randomZ = false;
 }
 
-var prototype$63 = inherits$1(WebGLRenderer, Renderer);
+var prototype$62 = inherits$1(WebGLRenderer, Renderer);
 var base$1 = Renderer.prototype;
 var tempBounds$2 = new Bounds();
-prototype$63.initialize = function(el, width, height, origin) {
+prototype$62.initialize = function(el, width, height, origin) {
   this._canvas = WebGL$1(1, 1); // instantiate a small canvas
   if (el) {
     clear(el, 0).appendChild(this._canvas);
@@ -27201,48 +27055,48 @@ prototype$63.initialize = function(el, width, height, origin) {
   return base$1.initialize.call(this, el, width, height, origin);
 };
 
-prototype$63.resize = function(width, height, origin) {
+prototype$62.resize = function(width, height, origin) {
   base$1.resize.call(this, width, height, origin);
   resize$1(this._canvas, this._width, this._height, this._origin);
   return this._redraw = true, this;
 };
 
-prototype$63.canvas = function() {
+prototype$62.canvas = function() {
   return this._canvas;
 };
 
-prototype$63.context = function() {
+prototype$62.context = function() {
   return this._canvas ? (
     this._canvas.getContext('webgl') ||
     this._canvas.getContext('experimental-webgl'))
     : null;
 };
 
-prototype$63.rotate = function(x, y, z) {
+prototype$62.rotate = function(x, y, z) {
   this._angleX = x;
   this._angleY = y;
   this._angleZ = z;
   return this;
 };
 
-prototype$63.translate = function(x, y, z) {
+prototype$62.translate = function(x, y, z) {
   this._translateX = x;
   this._translateY = y;
   this._translateZ = z;
   return this;
 };
 
-prototype$63.zFactor = function(z) {
+prototype$62.zFactor = function(z) {
   this._zFactor = z;
   return this;
 };
 
-prototype$63.depthTest = function(val) {
+prototype$62.depthTest = function(val) {
   this._depthTest = val;
   return this;
 };
 
-prototype$63.randomZ = function(val) {
+prototype$62.randomZ = function(val) {
   this._randomZ = val;
   return this;
 };
@@ -27251,7 +27105,7 @@ function clipToBounds$1(g, items) {
   // TODO: do something here?
 }
 
-prototype$63._render = function(scene, items) {
+prototype$62._render = function(scene, items) {
   var gl = this.context(),
       o = this._origin,
       w = this._width,
@@ -27291,7 +27145,7 @@ prototype$63._render = function(scene, items) {
   return this;
 };
 
-prototype$63.frame = function() {
+prototype$62.frame = function() {
   var gl = this.context();
 
   this.clear();
@@ -27348,14 +27202,14 @@ prototype$63.frame = function() {
   return this;
 };
 
-prototype$63.draw = function(ctx, scene, bounds) {
+prototype$62.draw = function(ctx, scene, bounds) {
   var mark = marks[scene.marktype];
   if (mark.drawGL) {
     mark.drawGL.call(this, ctx, scene, bounds);
   }
 };
 
-prototype$63.clear = function(x, y, w, h) {
+prototype$62.clear = function(x, y, w, h) {
   var gl = this.context(), c;
   if (this._bgcolor != null) {
     c = color$2(gl, null, this._bgcolor);
@@ -27375,19 +27229,19 @@ function SVGHandler() {
   Handler.call(this);
 }
 
-var prototype$64 = inherits$1(SVGHandler, Handler);
+var prototype$63 = inherits$1(SVGHandler, Handler);
 
-prototype$64.initialize = function(el, origin, obj) {
+prototype$63.initialize = function(el, origin, obj) {
   this._svg = el && find$1(el, 'svg');
   return Handler.prototype.initialize.call(this, el, origin, obj);
 };
 
-prototype$64.svg = function() {
+prototype$63.svg = function() {
   return this._svg;
 };
 
 // wrap an event listener for the SVG DOM
-prototype$64.listener = function(handler) {
+prototype$63.listener = function(handler) {
   var that = this;
   return function(evt) {
     var target = evt.target,
@@ -27399,7 +27253,7 @@ prototype$64.listener = function(handler) {
 };
 
 // add an event handler
-prototype$64.on = function(type, handler) {
+prototype$63.on = function(type, handler) {
   var name = this.eventName(type),
       h = this._handlers,
       x = {
@@ -27418,7 +27272,7 @@ prototype$64.on = function(type, handler) {
 };
 
 // remove an event handler
-prototype$64.off = function(type, handler) {
+prototype$63.off = function(type, handler) {
   var name = this.eventName(type),
       svg = this._svg,
       h = this._handlers[name], i;
@@ -27491,10 +27345,10 @@ function SVGRenderer(imageLoader) {
   this._defs = null;
 }
 
-var prototype$65 = inherits$1(SVGRenderer, Renderer);
+var prototype$64 = inherits$1(SVGRenderer, Renderer);
 var base$2 = Renderer.prototype;
 
-prototype$65.initialize = function(el, width, height, padding) {
+prototype$64.initialize = function(el, width, height, padding) {
   if (el) {
     this._svg = child(el, 0, 'svg', ns);
     this._svg.setAttribute('class', 'marks');
@@ -27517,14 +27371,14 @@ prototype$65.initialize = function(el, width, height, padding) {
   return base$2.initialize.call(this, el, width, height, padding);
 };
 
-prototype$65.background = function(bgcolor) {
+prototype$64.background = function(bgcolor) {
   if (arguments.length && this._svg) {
     this._svg.style.setProperty('background-color', bgcolor);
   }
   return base$2.background.apply(this, arguments);
 };
 
-prototype$65.resize = function(width, height, origin) {
+prototype$64.resize = function(width, height, origin) {
   base$2.resize.call(this, width, height, origin);
 
   if (this._svg) {
@@ -27536,7 +27390,7 @@ prototype$65.resize = function(width, height, origin) {
   return this;
 };
 
-prototype$65.svg = function() {
+prototype$64.svg = function() {
   if (!this._svg) return null;
 
   var attr = {
@@ -27554,7 +27408,7 @@ prototype$65.svg = function() {
 
 // -- Render entry point --
 
-prototype$65._render = function(scene, items) {
+prototype$64._render = function(scene, items) {
   // perform spot updates and re-render markup
   if (this._dirtyCheck(items)) {
     if (this._dirtyAll) this._resetDefs();
@@ -27568,7 +27422,7 @@ prototype$65._render = function(scene, items) {
 
 // -- Manage SVG definitions ('defs') block --
 
-prototype$65.updateDefs = function() {
+prototype$64.updateDefs = function() {
   var svg = this._svg,
       defs = this._defs,
       el = defs.el,
@@ -27625,7 +27479,7 @@ function updateClipping(el, clip, index) {
   rect.setAttribute('height', clip.height);
 }
 
-prototype$65._resetDefs = function() {
+prototype$64._resetDefs = function() {
   var def = this._defs;
   def.clip_id = 1;
   def.gradient = {};
@@ -27635,13 +27489,13 @@ prototype$65._resetDefs = function() {
 
 // -- Manage rendering of items marked as dirty --
 
-prototype$65.isDirty = function(item) {
+prototype$64.isDirty = function(item) {
   return this._dirtyAll
     || !item._svg
     || item.dirty === this._dirtyID;
 };
 
-prototype$65._dirtyCheck = function(items) {
+prototype$64._dirtyCheck = function(items) {
   this._dirtyAll = true;
   if (!items) return true;
 
@@ -27706,7 +27560,7 @@ function dirtyParents(item, id) {
 // -- Construct & maintain scenegraph to SVG mapping ---
 
 // Draw a mark container.
-prototype$65.draw = function(el, scene, prev) {
+prototype$64.draw = function(el, scene, prev) {
   if (!this.isDirty(scene)) return scene._svg;
 
   var renderer = this,
@@ -27826,7 +27680,7 @@ var mark_extras = {
   }
 };
 
-prototype$65._update = function(mdef, el, item) {
+prototype$64._update = function(mdef, el, item) {
   // set dom element and values cache
   // provides access to emit method
   element = el;
@@ -27868,7 +27722,7 @@ function emit(name, value, ns) {
   values$1[name] = value;
 }
 
-prototype$65.style = function(el, o) {
+prototype$64.style = function(el, o) {
   if (o == null) return;
   var i, n, prop, name, value;
 
@@ -27919,10 +27773,10 @@ function SVGStringRenderer(imageLoader) {
   };
 }
 
-var prototype$66 = inherits$1(SVGStringRenderer, Renderer);
+var prototype$65 = inherits$1(SVGStringRenderer, Renderer);
 var base$3 = Renderer.prototype;
 
-prototype$66.resize = function(width, height, origin) {
+prototype$65.resize = function(width, height, origin) {
   base$3.resize.call(this, width, height, origin);
   var o = this._origin,
       t = this._text;
@@ -27945,23 +27799,23 @@ prototype$66.resize = function(width, height, origin) {
   return this;
 };
 
-prototype$66.svg = function() {
+prototype$65.svg = function() {
   var t = this._text;
   return t.head + t.defs + t.root + t.body + t.foot;
 };
 
-prototype$66._render = function(scene) {
+prototype$65._render = function(scene) {
   this._text.body = this.mark(scene);
   this._text.defs = this.buildDefs();
   return this;
 };
 
-prototype$66.reset = function() {
+prototype$65.reset = function() {
   this._defs.clip_id = 0;
   return this;
 };
 
-prototype$66.buildDefs = function() {
+prototype$65.buildDefs = function() {
   var all = this._defs,
       defs = '',
       i, id, def, stops;
@@ -28012,13 +27866,13 @@ function emit$1(name, value, ns, prefixed) {
   object$3[prefixed || name] = value;
 }
 
-prototype$66.attributes = function(attr, item) {
+prototype$65.attributes = function(attr, item) {
   object$3 = {};
   attr(emit$1, item, this);
   return object$3;
 };
 
-prototype$66.mark = function(scene) {
+prototype$65.mark = function(scene) {
   var renderer = this,
       mdef = marks[scene.marktype],
       tag  = mdef.tag,
@@ -28062,7 +27916,7 @@ prototype$66.mark = function(scene) {
   return str + closeTag('g');
 };
 
-prototype$66.markGroup = function(scene) {
+prototype$65.markGroup = function(scene) {
   var renderer = this,
       str = '';
 
@@ -28213,9 +28067,9 @@ function Mark(params) {
   Transform.call(this, null, params);
 }
 
-var prototype$67 = inherits(Mark, Transform);
+var prototype$66 = inherits(Mark, Transform);
 
-prototype$67.transform = function(_, pulse) {
+prototype$66.transform = function(_, pulse) {
   var mark = this.value;
 
   // acquire mark on first invocation
@@ -28242,9 +28096,9 @@ function Render(params) {
   Transform.call(this, null, params);
 }
 
-var prototype$68 = inherits(Render, Transform);
+var prototype$67 = inherits(Render, Transform);
 
-prototype$68.transform = function(_, pulse) {
+prototype$67.transform = function(_, pulse) {
   var view = pulse.dataflow;
 
   if (pulse.changed(pulse.REM)) {
@@ -28284,9 +28138,9 @@ function ViewLayout(params) {
   Transform.call(this, null, params);
 }
 
-var prototype$69 = inherits(ViewLayout, Transform);
+var prototype$68 = inherits(ViewLayout, Transform);
 
-prototype$69.transform = function(_, pulse) {
+prototype$68.transform = function(_, pulse) {
   // TODO incremental update, output?
   var view = pulse.dataflow;
   _.mark.items.forEach(function(group) {
@@ -29029,7 +28883,7 @@ function initialize$1(el) {
     Renderer = (el ? SVGRenderer : SVGStringRenderer);
   }
   if (type === WebGL$2) {
-    Handler = WebGLHandler;
+    Handler = CanvasHandler;
     Renderer = WebGLRenderer;
   }
 
@@ -32473,9 +32327,9 @@ DataScope.fromEntries = function(scope, entries) {
   return new DataScope(scope, input, output, values);
 };
 
-var prototype$71 = DataScope.prototype;
+var prototype$70 = DataScope.prototype;
 
-prototype$71.countsRef = function(scope, field, sort) {
+prototype$70.countsRef = function(scope, field, sort) {
   var ds = this,
       cache = ds.counts || (ds.counts = {}),
       k = fieldKey(field), v, a, p;
@@ -32525,7 +32379,7 @@ function addSortField(scope, p, sort) {
   }
 }
 
-function cache(scope, ds, name, optype, field, counts, index) {
+function cache$3(scope, ds, name, optype, field, counts, index) {
   var cache = ds[name] || (ds[name] = {}),
       sort = sortKey(counts),
       k = fieldKey(field), v, op;
@@ -32549,28 +32403,28 @@ function cache(scope, ds, name, optype, field, counts, index) {
   return v;
 }
 
-prototype$71.tuplesRef = function() {
+prototype$70.tuplesRef = function() {
   return ref(this.values);
 };
 
-prototype$71.extentRef = function(scope, field) {
-  return cache(scope, this, 'extent', 'Extent', field, false);
+prototype$70.extentRef = function(scope, field) {
+  return cache$3(scope, this, 'extent', 'Extent', field, false);
 };
 
-prototype$71.domainRef = function(scope, field) {
-  return cache(scope, this, 'domain', 'Values', field, false);
+prototype$70.domainRef = function(scope, field) {
+  return cache$3(scope, this, 'domain', 'Values', field, false);
 };
 
-prototype$71.valuesRef = function(scope, field, sort) {
-  return cache(scope, this, 'vals', 'Values', field, sort || true);
+prototype$70.valuesRef = function(scope, field, sort) {
+  return cache$3(scope, this, 'vals', 'Values', field, sort || true);
 };
 
-prototype$71.lookupRef = function(scope, field) {
-  return cache(scope, this, 'lookup', 'TupleIndex', field, false);
+prototype$70.lookupRef = function(scope, field) {
+  return cache$3(scope, this, 'lookup', 'TupleIndex', field, false);
 };
 
-prototype$71.indataRef = function(scope, field) {
-  return cache(scope, this, 'indata', 'TupleIndex', field, true, true);
+prototype$70.indataRef = function(scope, field) {
+  return cache$3(scope, this, 'indata', 'TupleIndex', field, true, true);
 };
 
 function parseFacet(spec, scope, group) {
@@ -33577,15 +33431,15 @@ function Subscope(scope) {
   this._markpath = scope._markpath;
 }
 
-var prototype$72 = Scope.prototype = Subscope.prototype;
+var prototype$71 = Scope.prototype = Subscope.prototype;
 
 // ----
 
-prototype$72.fork = function() {
+prototype$71.fork = function() {
   return new Subscope(this);
 };
 
-prototype$72.toRuntime = function() {
+prototype$71.toRuntime = function() {
   return this.finish(), {
     background: this.background,
     operators:  this.operators,
@@ -33595,24 +33449,24 @@ prototype$72.toRuntime = function() {
   };
 };
 
-prototype$72.id = function() {
+prototype$71.id = function() {
   return (this._subid ? this._subid + ':' : 0) + this._id++;
 };
 
-prototype$72.add = function(op) {
+prototype$71.add = function(op) {
   return this.operators.push(op), op.id = this.id(), op;
 };
 
-prototype$72.addStream = function(stream) {
+prototype$71.addStream = function(stream) {
   return this.streams.push(stream), stream.id = this.id(), stream;
 };
 
-prototype$72.addUpdate = function(update) {
+prototype$71.addUpdate = function(update) {
   return this.updates.push(update), update;
 };
 
 // Apply metadata
-prototype$72.finish = function() {
+prototype$71.finish = function() {
   var name, ds;
 
   // annotate root
@@ -33652,34 +33506,34 @@ prototype$72.finish = function() {
 
 // ----
 
-prototype$72.pushState = function(encode, parent) {
+prototype$71.pushState = function(encode, parent) {
   this._encode.push(ref(this.add(Sieve$1({pulse: encode}))));
   this._parent.push(parent);
   this._markpath.push(-1);
 };
 
-prototype$72.popState = function() {
+prototype$71.popState = function() {
   this._parent.pop();
   this._encode.pop();
   this._markpath.pop();
 };
 
-prototype$72.parent = function() {
+prototype$71.parent = function() {
   return peek(this._parent);
 };
 
-prototype$72.encode = function() {
+prototype$71.encode = function() {
   return peek(this._encode);
 };
 
-prototype$72.markpath = function() {
+prototype$71.markpath = function() {
   var p = this._markpath;
   return ++p[p.length-1], p.slice();
 };
 
 // ----
 
-prototype$72.fieldRef = function(field, name) {
+prototype$71.fieldRef = function(field, name) {
   if (isString(field)) return fieldRef(field, name);
   if (!field.signal) {
     error('Unsupported field reference: ' + JSON.stringify(field));
@@ -33697,7 +33551,7 @@ prototype$72.fieldRef = function(field, name) {
   return f;
 };
 
-prototype$72.compareRef = function(cmp) {
+prototype$71.compareRef = function(cmp) {
   function check(_) {
     return isSignal(_) ? (signal = true, ref(sig[_.signal])) : _;
   }
@@ -33712,7 +33566,7 @@ prototype$72.compareRef = function(cmp) {
     : compareRef(fields, orders);
 };
 
-prototype$72.keyRef = function(fields) {
+prototype$71.keyRef = function(fields) {
   function check(_) {
     return isSignal(_) ? (signal = true, ref(sig[_.signal])) : _;
   }
@@ -33726,7 +33580,7 @@ prototype$72.keyRef = function(fields) {
     : keyRef(fields);
 };
 
-prototype$72.sortRef = function(sort) {
+prototype$71.sortRef = function(sort) {
   if (!sort) return sort;
 
   // including id ensures stable sorting
@@ -33744,7 +33598,7 @@ prototype$72.sortRef = function(sort) {
 
 // ----
 
-prototype$72.event = function(source, type) {
+prototype$71.event = function(source, type) {
   var key = source + ':' + type;
   if (!this.events[key]) {
     var id = this.id();
@@ -33760,7 +33614,7 @@ prototype$72.event = function(source, type) {
 
 // ----
 
-prototype$72.addSignal = function(name, value) {
+prototype$71.addSignal = function(name, value) {
   if (this.signals.hasOwnProperty(name)) {
     error('Duplicate signal name: ' + name);
   }
@@ -33768,14 +33622,14 @@ prototype$72.addSignal = function(name, value) {
   return this.signals[name] = op;
 };
 
-prototype$72.getSignal = function(name) {
+prototype$71.getSignal = function(name) {
   if (!this.signals[name]) {
     error('Unrecognized signal name: ' + name);
   }
   return this.signals[name];
 };
 
-prototype$72.signalRef = function(s) {
+prototype$71.signalRef = function(s) {
   if (this.signals[s]) {
     return ref(this.signals[s]);
   } else if (!this.lambdas[s]) {
@@ -33784,7 +33638,7 @@ prototype$72.signalRef = function(s) {
   return ref(this.lambdas[s]);
 };
 
-prototype$72.parseLambdas = function() {
+prototype$71.parseLambdas = function() {
   var code = Object.keys(this.lambdas);
   for (var i=0, n=code.length; i<n; ++i) {
     var s = code[i],
@@ -33795,66 +33649,66 @@ prototype$72.parseLambdas = function() {
   }
 };
 
-prototype$72.property = function(spec) {
+prototype$71.property = function(spec) {
   return spec && spec.signal ? this.signalRef(spec.signal) : spec;
 };
 
-prototype$72.addBinding = function(name, bind) {
+prototype$71.addBinding = function(name, bind) {
   if (!this.bindings) error('Nested signals do not support binding.');
   this.bindings.push(extend({signal: name}, bind));
 };
 
 // ----
 
-prototype$72.addScaleProj = function(name, transform) {
+prototype$71.addScaleProj = function(name, transform) {
   if (this.scales.hasOwnProperty(name)) {
     error('Duplicate scale or projection name: ' + name);
   }
   this.scales[name] = this.add(transform);
 }
 
-prototype$72.addScale = function(name, params) {
+prototype$71.addScale = function(name, params) {
   this.addScaleProj(name, Scale$1(params));
 };
 
-prototype$72.addProjection = function(name, params) {
+prototype$71.addProjection = function(name, params) {
   this.addScaleProj(name, Projection$1(params));
 };
 
-prototype$72.getScale = function(name) {
+prototype$71.getScale = function(name) {
   if (!this.scales[name]) {
     error('Unrecognized scale name: ' + name);
   }
   return this.scales[name];
 };
 
-prototype$72.projectionRef =
-prototype$72.scaleRef = function(name) {
+prototype$71.projectionRef =
+prototype$71.scaleRef = function(name) {
   return ref(this.getScale(name));
 };
 
-prototype$72.projectionType =
-prototype$72.scaleType = function(name) {
+prototype$71.projectionType =
+prototype$71.scaleType = function(name) {
   return this.getScale(name).params.type;
 };
 
 // ----
 
-prototype$72.addData = function(name, dataScope) {
+prototype$71.addData = function(name, dataScope) {
   if (this.data.hasOwnProperty(name)) {
     error('Duplicate data set name: ' + name);
   }
   this.data[name] = dataScope;
 };
 
-prototype$72.getData = function(name) {
+prototype$71.getData = function(name) {
   if (!this.data[name]) {
     error('Undefined data set name: ' + name);
   }
   return this.data[name];
 };
 
-prototype$72.addDataPipeline = function(name, entries) {
+prototype$71.addDataPipeline = function(name, entries) {
   if (this.data.hasOwnProperty(name)) {
     error('Duplicate data set name: ' + name);
   }
@@ -34563,11 +34417,11 @@ function View(spec, options) {
   cursor(this);
 }
 
-var prototype$70 = inherits(View, Dataflow);
+var prototype$69 = inherits(View, Dataflow);
 
 // -- DATAFLOW / RENDERING ----
 
-prototype$70.run = function(encode) {
+prototype$69.run = function(encode) {
   Dataflow.prototype.run.call(this, encode);
 
   var q = this._queue;
@@ -34579,7 +34433,7 @@ prototype$70.run = function(encode) {
   return this;
 };
 
-prototype$70.render = function(update) {
+prototype$69.render = function(update) {
   if (this._renderer) {
     if (this._resize) this._resize = 0, resizeRenderer(this);
     this._renderer.render(this._scenegraph.root, update);
@@ -34587,7 +34441,7 @@ prototype$70.render = function(update) {
   return this;
 };
 
-prototype$70.enqueue = function(items) {
+prototype$69.enqueue = function(items) {
   if (this._queue && items && items.length) {
     this._queue = this._queue.concat(items);
   }
@@ -34595,34 +34449,34 @@ prototype$70.enqueue = function(items) {
 
 // -- GET / SET ----
 
-prototype$70.signal = function(name, value, options) {
+prototype$69.signal = function(name, value, options) {
   var op = this._signals[name];
   return arguments.length === 1
     ? (op ? op.value : undefined)
     : this.update(op, value, options);
 };
 
-prototype$70.scenegraph = function() {
+prototype$69.scenegraph = function() {
   return this._scenegraph;
 };
 
-prototype$70.background = function(_) {
+prototype$69.background = function(_) {
   return arguments.length ? (this._background = _, this._resize = 1, this) : this._background;
 };
 
-prototype$70.width = function(_) {
+prototype$69.width = function(_) {
   return arguments.length ? this.signal('width', _) : this.signal('width');
 };
 
-prototype$70.height = function(_) {
+prototype$69.height = function(_) {
   return arguments.length ? this.signal('height', _) : this.signal('height');
 };
 
-prototype$70.padding = function(_) {
+prototype$69.padding = function(_) {
   return arguments.length ? this.signal('padding', _) : this.signal('padding');
 };
 
-prototype$70.renderer = function(type) {
+prototype$69.renderer = function(type) {
   if (!arguments.length) return this._renderType;
   if (type !== SVG && type !== WebGL$2 && type !== None$2) type = Canvas$2;
   if (type !== this._renderType) {
@@ -34636,31 +34490,31 @@ prototype$70.renderer = function(type) {
 };
 
 // -- SIZING ----
-prototype$70.autosize = autosize;
+prototype$69.autosize = autosize;
 
 // -- DATA ----
-prototype$70.data = data;
-prototype$70.insert = insert;
-prototype$70.remove = remove;
+prototype$69.data = data;
+prototype$69.insert = insert;
+prototype$69.remove = remove;
 
 // -- INITIALIZATION ----
-prototype$70.initialize = initialize$1;
+prototype$69.initialize = initialize$1;
 
 // -- HEADLESS RENDERING ----
-prototype$70.toImageURL = renderToImageURL;
-prototype$70.toCanvas = renderToCanvas;
-prototype$70.toSVG = renderToSVG;
+prototype$69.toImageURL = renderToImageURL;
+prototype$69.toCanvas = renderToCanvas;
+prototype$69.toSVG = renderToSVG;
 
 // -- EVENT HANDLING ----
-prototype$70.events = events$1;
-prototype$70.finalize = finalize;
-prototype$70.hover = hover;
+prototype$69.events = events$1;
+prototype$69.finalize = finalize;
+prototype$69.hover = hover;
 
 // -- INPUT BINDING ---
-prototype$70.bind = bind$1;
+prototype$69.bind = bind$1;
 
 // -- SAVE / RESTORE STATE ----
-prototype$70.state = state;
+prototype$69.state = state;
 
 transform('Bound', Bound);
 transform('Mark', Mark);

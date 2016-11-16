@@ -144,8 +144,8 @@ function updateAnimation() {
 
 function load(name) {
   fetch('spec/' + name + '.vg.json')
-      .then(response => response.json())
-      .then(spec => {
+      .then(function(response) { return response.json(); })
+      .then(function(spec) {
 
         var runtime2 = vega.parse(spec);
         var view2 = new vega.View(runtime2)
