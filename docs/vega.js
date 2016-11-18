@@ -24625,12 +24625,12 @@ var index$5 = function(contours, opt) {
     }
 }
 
-var cache$1 = {};
+var cache = {};
 
 function geometryForPath(context, path, threshold) {
   var key = path + ';' + context._tx + ';' + context._ty + ';' + context.z;
-  if (cache$1[key]) {
-    return cache$1[key];
+  if (cache[key]) {
+    return cache[key];
   }
 
   threshold = threshold || 1.0;
@@ -24673,7 +24673,7 @@ function geometryForPath(context, path, threshold) {
   }
 
   var geom = {lines: lines, triangles: triangles, closed: path.endsWith('Z'), z: z};
-  cache$1[key] = geom;
+  cache[key] = geom;
   return geom;
 }
 
@@ -24717,19 +24717,12 @@ function area$1(context, items) {
   return geometryForPath(context, s.context(null)(items), 0.1);
 }
 
-var cache = {};
-
 function shape(context, item) {
   var s = item.mark.shape || item.shape;
   if (context.arc) {
     return s.context(context)(item);
   }
-  var key = item._id;
-  if (cache[key]) {
-    return cache[key];
-  }
-  cache[key] = geometryForPath(context, s.context(null)(item), 1);
-  return cache[key];
+  return geometryForPath(context, s.context(null)(item), 1);
 }
 
 function line$1(context, items) {
@@ -25035,34 +25028,35 @@ function translateItem(item) {
   return translate(item.x || 0, item.y || 0);
 }
 
-var cache$2 = {};
+function drawGeometry(geom, gl, item) {
+  var opacity = item.opacity == null ? 1 : item.opacity;
+  if (opacity <= 0) return;
+  if (geom.numTriangles === 0) return;
+
+  gl.bindBuffer(gl.ARRAY_BUFFER, geom.triangleBuffer);
+  gl.vertexAttribPointer(gl._coordLocation, 3, gl.FLOAT, false, 0, 0);
+  gl.enableVertexAttribArray(gl._coordLocation);
+
+  gl.bindBuffer(gl.ARRAY_BUFFER, geom.colorBuffer);
+  gl.vertexAttribPointer(gl._colorLocation, 4, gl.FLOAT, false, 0, 0);
+  gl.enableVertexAttribArray(gl._colorLocation);
+
+  gl.drawArrays(gl.TRIANGLES, 0, geom.numTriangles * 3);
+}
+
+var cache$1 = {};
 
 function color$2(context, item, value) {
   if (value.id) {
     // TODO: support gradients
     return [1.0, 1.0, 1.0];
   }
-  if (cache$2[value]) {
-    return cache$2[value];
+  if (cache$1[value]) {
+    return cache$1[value];
   }
   var rgb = color(value).rgb();
-  cache$2[value] = [rgb.r / 255, rgb.g / 255, rgb.b / 255];
-  return cache$2[value];
-}
-
-function fill$1(context, item, opacity, count) {
-  var i, c, tc = context._triangleColor;
-  opacity *= (item.fillOpacity==null ? 1 : item.fillOpacity);
-  // TODO: don't special-case 'transparent'
-  if (opacity > 0 && item.fill !== 'transparent') {
-    c = color$2(context, item, item.fill);
-    for (i = 0; i < count * 3; i++) {
-      tc.push(c[0], c[1], c[2], opacity);
-    }
-    return true;
-  } else {
-    return false;
-  }
+  cache$1[value] = [rgb.r / 255, rgb.g / 255, rgb.b / 255];
+  return cache$1[value];
 }
 
 var __moduleExports$10 = function numtype(num, def) {
@@ -25435,69 +25429,117 @@ function extrusions(positions, point, normal, scale) {
 
 var index$6 = Stroke
 
-// TODO: Support line dash and line dash offset
+function geometryForItem(context, item, shapeGeom, opacity) {
+  var triangles = [];
+  var colors = [];
+  var z = shapeGeom.z || 0,
+      st = shapeGeom.triangles;
 
-function strokeGL(context, item, opacity, polylines, closed, z) {
+  var i, len, c, li, ci;
+  var opacity = item.opacity == null ? 1 : item.opacity;
+  var fillOpacity = opacity * (item.fillOpacity==null ? 1 : item.fillOpacity);
+  var n = 0;
+  var fill = false;
+  if (item.fill && fillOpacity > 0 && item.fill !== 'transparent') {
+    fill = true;
+    n = st ? st.length / 9 : 0;
+  }
 
-  // TODO: Don't have special case for 'transparent'
-  opacity *= (item.strokeOpacity==null ? 1 : item.strokeOpacity);
-  if (opacity <= 0 || item.stroke === 'transparent') return false;
-
+  var strokeOpacity = opacity * (item.strokeOpacity==null ? 1 : item.strokeOpacity);
   var lw = (lw = item.strokeWidth) != null ? lw : 1,
       lc = (lc = item.strokeCap) != null ? lc : 'butt';
-  if (lw <= 0) return false;
+  var stroke = false;
+  var strokeMeshes = [];
+  if (lw > 0 && item.stroke && strokeOpacity > 0 && item.stroke !== 'transparent') {
+    stroke = true;
+    var strokeExtrude = index$6({
+        thickness: lw,
+        cap: lc,
+        join: 'miter',
+        miterLimit: 10,
+        closed: !!shapeGeom.closed
+    });
+    for (li = 0; li < shapeGeom.lines.length; li++) {
+      var mesh = strokeExtrude.build(shapeGeom.lines[li]);
+      strokeMeshes.push(mesh);
+      n += mesh.cells.length;
+    }
+  }
 
-  var strokeExtrude = index$6({
-      thickness: lw,
-      cap: lc,
-      join: 'miter',
-      miterLimit: 10,
-      closed: closed
-  });
+  var triangles = new Float32Array(n * 3 * 3);
+  var colors = new Float32Array(n * 3 * 4);
 
-  var c = color$2(context, item, item.stroke);
+  if (fill) {
+    c = color$2(context, item, item.fill);
+    for (i = 0, len = st.length; i < len; i++) {
+      triangles[i] = st[i];
+    }
+    for (i = 0, len = st.length / 3; i < len; i++) {
+      colors[i*4    ] = c[0];
+      colors[i*4 + 1] = c[1];
+      colors[i*4 + 2] = c[2];
+      colors[i*4 + 3] = fillOpacity;
+    }
+  }
 
-  for (var li = 0; li < polylines.length; li++) {
-    var polyline = polylines[li];
-    var mesh = strokeExtrude.build(polyline);
-    var mp = mesh.positions,
-        mc = mesh.cells,
-        mcl = mesh.cells.length,
-        tg = context._triangleGeometry,
-        tc = context._triangleColor,
-        tx = context._tx + context._origin[0],
-        ty = context._ty + context._origin[1];
-    for (var ci = 0; ci < mcl; ci++) {
-      var cell = mc[ci];
-      var p1 = mp[cell[0]];
-      var p2 = mp[cell[1]];
-      var p3 = mp[cell[2]];
-      tg.push(p1[0] + tx, p1[1] + ty, z, p2[0] + tx, p2[1] + ty, z, p3[0] + tx, p3[1] + ty, z);
-      for (var i = 0; i < 3; i++) {
-        tc.push(c[0], c[1], c[2], opacity);
+  var tx = context._tx + context._origin[0],
+      ty = context._ty + context._origin[1];
+  if (stroke) {
+    c = color$2(context, item, item.stroke);
+    i = fill ? st.length / 3 : 0;
+    for (li = 0; li < strokeMeshes.length; li++) {
+      var mesh = strokeMeshes[li],
+          mp = mesh.positions,
+          mc = mesh.cells,
+          mcl = mesh.cells.length;
+      for (ci = 0; ci < mcl; ci++) {
+        var cell = mc[ci];
+        var p1 = mp[cell[0]];
+        var p2 = mp[cell[1]];
+        var p3 = mp[cell[2]];
+        triangles[i*3    ] = p1[0] + tx;
+        triangles[i*3 + 1] = p1[1] + ty;
+        triangles[i*3 + 2] = z;
+        colors[i*4    ] = c[0];
+        colors[i*4 + 1] = c[1];
+        colors[i*4 + 2] = c[2];
+        colors[i*4 + 3] = strokeOpacity;
+        i++;
+
+        triangles[i*3    ] = p2[0] + tx;
+        triangles[i*3 + 1] = p2[1] + ty;
+        triangles[i*3 + 2] = z;
+        colors[i*4    ] = c[0];
+        colors[i*4 + 1] = c[1];
+        colors[i*4 + 2] = c[2];
+        colors[i*4 + 3] = strokeOpacity;
+        i++;
+
+        triangles[i*3    ] = p3[0] + tx;
+        triangles[i*3 + 1] = p3[1] + ty;
+        triangles[i*3 + 2] = z;
+        colors[i*4    ] = c[0];
+        colors[i*4 + 1] = c[1];
+        colors[i*4 + 2] = c[2];
+        colors[i*4 + 3] = strokeOpacity;
+        i++;
       }
     }
   }
 
-  return true;
-}
+  var triangleBuffer = context.createBuffer();
+  context.bindBuffer(context.ARRAY_BUFFER, triangleBuffer);
+  context.bufferData(context.ARRAY_BUFFER, triangles, context.STATIC_DRAW);
 
-function drawGeometry(geom, context, item) {
-  var opacity = item.opacity == null ? 1 : item.opacity,
-      tg = context._triangleGeometry;
+  var colorBuffer = context.createBuffer();
+  context.bindBuffer(context.ARRAY_BUFFER, colorBuffer);
+  context.bufferData(context.ARRAY_BUFFER, colors, context.STATIC_DRAW);
 
-  if (opacity <= 0) return;
-  if (item.fill && fill$1(context, item, opacity, geom.triangles.length / 9)) {
-    var tl = geom.triangles.length,
-        t = geom.triangles;
-    for (var i = 0; i < tl; i++) {
-      tg.push(t[i]);
-    }
-  }
-
-  if (item.stroke) {
-    strokeGL(context, item, opacity, geom.lines, geom.closed, geom.z);
-  }
+  return {
+    triangleBuffer: triangleBuffer,
+    colorBuffer: colorBuffer,
+    numTriangles: n
+  };
 }
 
 function markItemPath(type, shape) {
@@ -25532,8 +25574,15 @@ function markItemPath(type, shape) {
       context._tx += x;
       context._ty += y;
 
-      var geom = shape(context, item);
-      drawGeometry(geom, context, item);
+      if (context._fullRedraw || item._dirty || !item._geom) {
+        if (item._geom) {
+          context.deleteBuffer(item._geom.triangleBuffer);
+          context.deleteBuffer(item._geom.colorBuffer);
+        }
+        var shapeGeom = shape(context, item);
+        item._geom = geometryForItem(context, item, shapeGeom);
+      }
+      drawGeometry(item._geom, context, item);
 
       context._tx -= x;
       context._ty -= y;
@@ -25594,7 +25643,22 @@ function markMultiItemPath(type, shape) {
     if (scene.items.length && (!bounds || bounds.intersects(scene.bounds))) {
       var item = scene.items[0];
       var geom = shape(context, scene.items);
-      drawGeometry(geom, context, item);
+      var dirty = false;
+      for (var i = 0; i < scene.items.length; i++) {
+        if (scene.items[i]._dirty) {
+          dirty = true;
+          break;
+        }
+      }
+      if (context._fullRedraw || dirty || !item._geom) {
+        if (item._geom) {
+          context.deleteBuffer(item._geom.triangleBuffer);
+          context.deleteBuffer(item._geom.colorBuffer);
+        }
+        var shapeGeom = shape(context, scene.items);
+        item._geom = geometryForItem(context, item, shapeGeom);
+      }
+      drawGeometry(item._geom, context, item);
     }
   }
 
@@ -25764,14 +25828,16 @@ function drawGL(context, scene, bounds) {
     context._textContext.translate(gx, gy);
 
     // draw group background
-    if (group.stroke || group.fill) {
-      opacity = group.opacity == null ? 1 : group.opacity;
-      if (opacity > 0) {
-        offset = group.stroke ? 0.5 : 0;
-        var geom = rectangle(context, group, offset, offset);
-        drawGeometry(geom, context, group);
+    if (context._fullRedraw || group._dirty || !group._geom) {
+      if (group._geom) {
+        context.deleteBuffer(group._geom.triangleBuffer);
+        context.deleteBuffer(group._geom.colorBuffer);
       }
+      offset = group.stroke ? 0.5 : 0;
+      var shapeGeom = rectangle(context, group, offset, offset);
+      group._geom = geometryForItem(context, group, shapeGeom);
     }
+    drawGeometry(group._geom, context, group);
 
     // set clip and bounds
     if (group.clip) {
@@ -26089,13 +26155,8 @@ function path$1(context, item) {
 
 function drawGL$2(context, scene, bounds) {
   visit(scene, function(item) {
-    var opacity = item.opacity == null ? 1 : item.opacity;
-    if (opacity === 0) return;
-
     var path = item.path;
     if (path == null) return true;
-
-    var geom = geometryForPath(context, path);
 
     var x = item.x || 0,
         y = item.y || 0;
@@ -26103,7 +26164,15 @@ function drawGL$2(context, scene, bounds) {
     context._tx += x;
     context._ty += y;
 
-    drawGeometry(geom, context, item);
+    if (context._fullRedraw || item._dirty || !item._geom) {
+      if (item._geom) {
+        context.deleteBuffer(item._geom.triangleBuffer);
+        context.deleteBuffer(item._geom.colorBuffer);
+      }
+      var shapeGeom = geometryForPath(context, path);
+      item._geom = geometryForItem(context, item, shapeGeom);
+    }
+    drawGeometry(item._geom, context, item);
 
     context._tx -= x;
     context._ty -= y;
@@ -26146,17 +26215,19 @@ function draw$2(context, item) {
   rectangle(context, item);
 }
 
-function pathGL(context, item, opacity) {
-  var geom = rectangle(context, item);
-  drawGeometry(geom, context, item);
-  return true;
-}
-
 function drawGL$3(context, scene, bounds) {
   visit(scene, function(item) {
     if (bounds && !bounds.intersects(item.bounds)) return; // bounds check
-    var opacity = item.opacity == null ? 1 : item.opacity;
-    pathGL(context, item, opacity);
+
+    if (context._fullRedraw || item._dirty || !item._geom) {
+      if (item._geom) {
+        context.deleteBuffer(item._geom.triangleBuffer);
+        context.deleteBuffer(item._geom.colorBuffer);
+      }
+      var shapeGeom = rectangle(context, item);
+      item._geom = geometryForItem(context, item, shapeGeom);
+    }
+    drawGeometry(item._geom, context, item);
   });
 }
 
@@ -26218,27 +26289,26 @@ function hit(context, item, x, y) {
   return path$3(context, item, 1) && context.isPointInStroke(x, y);
 }
 
-function pathGL$1(context, item, opacity) {
-  var x1, y1, x2, y2, line;
-
-  x1 = item.x || 0;
-  y1 = item.y || 0;
-  x2 = item.x2 != null ? item.x2 : x1;
-  y2 = item.y2 != null ? item.y2 : y1;
-
-  line = [[x1, y1], [x2, y2]];
-
-  if (item.stroke && strokeGL(context, item, opacity, [line], false, 0)) {
-    return true;
-  }
-  return false;
-}
-
 function drawGL$4(context, scene, bounds) {
   visit(scene, function(item) {
+    var x1, y1, x2, y2, line, shapeGeom;
     if (bounds && !bounds.intersects(item.bounds)) return; // bounds check
-    var opacity = item.opacity == null ? 1 : item.opacity;
-    pathGL$1(context, item, opacity);
+    if (context._fullRedraw || item._dirty || !item._geom) {
+      if (item._geom) {
+        context.deleteBuffer(item._geom.triangleBuffer);
+        context.deleteBuffer(item._geom.colorBuffer);
+      }
+      x1 = item.x || 0;
+      y1 = item.y || 0;
+      x2 = item.x2 != null ? item.x2 : x1;
+      y2 = item.y2 != null ? item.y2 : y1;
+      shapeGeom = {
+        lines: [[[x1, y1], [x2, y2]]],
+        closed: false
+      };
+      item._geom = geometryForItem(context, item, shapeGeom);
+    }
+    drawGeometry(item._geom, context, item);
   });
 }
 
@@ -27105,60 +27175,9 @@ function clipToBounds$1(g, items) {
   // TODO: do something here?
 }
 
-prototype$62._render = function(scene, items) {
-  var gl = this.context(),
-      o = this._origin,
-      w = this._width,
-      h = this._height,
-      b;
-
-  gl._tx = 0;
-  gl._ty = 0;
-  gl._triangleGeometry = [];
-  gl._triangleColor = [];
-  gl._images = [];
-  gl._randomZ = this._randomZ;
-
-  b = (!items || this._redraw)
-    ? (this._redraw = false, null)
-    : clipToBounds$1(gl, items);
-
-  this.draw(gl, scene, b);
-
-  var imgInfo = loadImageAndCreateTextureInfo(gl, gl._textCanvas);
-  imgInfo.x = 0;
-  imgInfo.y = 0;
-  imgInfo.w = gl.canvas.width / gl._ratio;
-  imgInfo.h = gl.canvas.height / gl._ratio;
-  gl._images.push(imgInfo);
-
-  this._triangleBuffer = gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER, this._triangleBuffer);
-  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(gl._triangleGeometry), gl.STATIC_DRAW);
-
-  this._triangleColorBuffer = gl.createBuffer();
-  gl.bindBuffer(gl.ARRAY_BUFFER, this._triangleColorBuffer);
-  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(gl._triangleColor), gl.STATIC_DRAW);
-
-  this.frame();
-
-  return this;
-};
-
-prototype$62.frame = function() {
+prototype$62._updateUniforms = function() {
   var gl = this.context();
-
-  this.clear();
-
   gl.useProgram(gl._shaderProgram);
-
-  gl.bindBuffer(gl.ARRAY_BUFFER, this._triangleBuffer);
-  gl.vertexAttribPointer(gl._coordLocation, 3, gl.FLOAT, false, 0, 0);
-  gl.enableVertexAttribArray(gl._coordLocation);
-
-  gl.bindBuffer(gl.ARRAY_BUFFER, this._triangleColorBuffer);
-  gl.vertexAttribPointer(gl._colorLocation, 4, gl.FLOAT, false, 0, 0);
-  gl.enableVertexAttribArray(gl._colorLocation);
 
   var width = gl.canvas.width / gl._ratio;
   var height = gl.canvas.height / gl._ratio;
@@ -27170,12 +27189,55 @@ prototype$62.frame = function() {
     -1, height/width, 0, 1
   ];
 
-  var matrix = [
+  this.matrix = [
     1, 0, 0, 0,
     0, 1, 0, 0,
     0, 0, 1, 0,
     0, 0, 0, 1
   ];
+
+  this.matrix = multiply(this.matrix, perspective(Math.PI/2, width/height, 0.1, 3000));
+  this.matrix = multiply(this.matrix, translateGL(this._translateX, this._translateY, (this._translateZ - 1)*height/width));
+  this.matrix = multiply(this.matrix, rotateZ(this._angleZ));
+  this.matrix = multiply(this.matrix, rotateY(this._angleY));
+  this.matrix = multiply(this.matrix, rotateX(this._angleX));
+  this.matrix = multiply(this.matrix, translateGL(0, 0, 1));
+  this.matrix = multiply(this.matrix, smooshMatrix);
+
+  gl.uniform1f(gl._zFactorLocation, this._zFactor);
+  gl.uniformMatrix4fv(gl._matrixLocation, false, this.matrix);
+}
+
+prototype$62._render = function(scene, items) {
+  var gl = this.context(),
+      o = this._origin,
+      w = this._width,
+      h = this._height,
+      b, i;
+
+  gl._tx = 0;
+  gl._ty = 0;
+  gl._triangleGeometry = [];
+  gl._triangleColor = [];
+  if (gl._images) {
+    for (i = 0; i < gl._images.length; i++) {
+      gl.deleteTexture(gl._images[i].texture);
+    }
+  }
+  gl._images = [];
+  gl._randomZ = this._randomZ;
+
+  b = (!items || this._redraw)
+    ? (this._redraw = false, null)
+    : clipToBounds$1(gl, items);
+
+  if (items) {
+    for (i = 0; i < items.length; i++) {
+      items[i]._dirty = true;
+    }
+  } else {
+    gl._fullRedraw = true;
+  }
 
   if (this._depthTest) {
     gl.enable(gl.DEPTH_TEST);
@@ -27183,22 +27245,38 @@ prototype$62.frame = function() {
     gl.disable(gl.DEPTH_TEST);
   }
 
-  matrix = multiply(matrix, perspective(Math.PI/2, width/height, 0.1, 3000));
-  matrix = multiply(matrix, translateGL(this._translateX, this._translateY, (this._translateZ - 1)*height/width));
-  matrix = multiply(matrix, rotateZ(this._angleZ));
-  matrix = multiply(matrix, rotateY(this._angleY));
-  matrix = multiply(matrix, rotateX(this._angleX));
-  matrix = multiply(matrix, translateGL(0, 0, 1));
-  matrix = multiply(matrix, smooshMatrix);
+  this._updateUniforms();
 
-  gl.uniform1f(gl._zFactorLocation, this._zFactor);
-  gl.uniformMatrix4fv(gl._matrixLocation, false, matrix);
-  gl.drawArrays(gl.TRIANGLES, 0, gl._triangleGeometry.length / 3);
+  this.clear();
 
-  gl._images.forEach(function(texInfo) {
-    drawImage(gl, texInfo, matrix);
-  });
+  this.draw(gl, scene, b);
 
+  var imgInfo = loadImageAndCreateTextureInfo(gl, gl._textCanvas);
+  imgInfo.x = 0;
+  imgInfo.y = 0;
+  imgInfo.w = gl.canvas.width / gl._ratio;
+  imgInfo.h = gl.canvas.height / gl._ratio;
+  gl._images.push(imgInfo);
+
+  for (i = 0; i < gl._images.length; i++) {
+    drawImage(gl, gl._images[i], this.matrix);
+  }
+
+  if (items) {
+    for (i = 0; i < items.length; i++) {
+      items[i]._dirty = false;
+    }
+  }
+  gl._fullRedraw = false;
+  this._lastScene = scene;
+
+  return this;
+};
+
+prototype$62.frame = function() {
+  if (this._lastScene) {
+    this._render(this._lastScene, []);
+  }
   return this;
 };
 
@@ -32379,7 +32457,7 @@ function addSortField(scope, p, sort) {
   }
 }
 
-function cache$3(scope, ds, name, optype, field, counts, index) {
+function cache$2(scope, ds, name, optype, field, counts, index) {
   var cache = ds[name] || (ds[name] = {}),
       sort = sortKey(counts),
       k = fieldKey(field), v, op;
@@ -32408,23 +32486,23 @@ prototype$70.tuplesRef = function() {
 };
 
 prototype$70.extentRef = function(scope, field) {
-  return cache$3(scope, this, 'extent', 'Extent', field, false);
+  return cache$2(scope, this, 'extent', 'Extent', field, false);
 };
 
 prototype$70.domainRef = function(scope, field) {
-  return cache$3(scope, this, 'domain', 'Values', field, false);
+  return cache$2(scope, this, 'domain', 'Values', field, false);
 };
 
 prototype$70.valuesRef = function(scope, field, sort) {
-  return cache$3(scope, this, 'vals', 'Values', field, sort || true);
+  return cache$2(scope, this, 'vals', 'Values', field, sort || true);
 };
 
 prototype$70.lookupRef = function(scope, field) {
-  return cache$3(scope, this, 'lookup', 'TupleIndex', field, false);
+  return cache$2(scope, this, 'lookup', 'TupleIndex', field, false);
 };
 
 prototype$70.indataRef = function(scope, field) {
-  return cache$3(scope, this, 'indata', 'TupleIndex', field, true, true);
+  return cache$2(scope, this, 'indata', 'TupleIndex', field, true, true);
 };
 
 function parseFacet(spec, scope, group) {
