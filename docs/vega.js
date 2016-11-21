@@ -24625,18 +24625,17 @@ var index$5 = function(contours, opt) {
     }
 }
 
-var cache = {};
-
 function geometryForPath(context, path, threshold) {
-  var key = path + ';' + context._tx + ';' + context._ty + ';' + context.z;
-  if (cache[key]) {
-    return cache[key];
+  var key = path;
+  if (context._pathCache[key]) {
+    return context._pathCache[key];
   }
 
   threshold = threshold || 1.0;
   if (!path) {
     return {lines: [], triangles: [], closed: false, z: 0};
   }
+
   // get a list of polylines/contours from svg contents
   var lines = index$4(index$2(path)), tri;
 
@@ -24656,9 +24655,7 @@ function geometryForPath(context, path, threshold) {
     tri = {positions: [], cells: []};
   }
 
-  var z = context._randomZ ? 0.25*(Math.random() - 0.5) : 0,
-      tx = context._tx + context._origin[0],
-      ty = context._ty + context._origin[1];
+  var z = context._randomZ ? 0.25*(Math.random() - 0.5) : 0;
 
   var triangles = [];
   var tcl = tri.cells.length,
@@ -24669,11 +24666,24 @@ function geometryForPath(context, path, threshold) {
     var p1 = tp[cell[0]];
     var p2 = tp[cell[1]];
     var p3 = tp[cell[2]];
-    triangles.push(p1[0] + tx, p1[1] + ty, z, p2[0] + tx, p2[1] + ty, z, p3[0] + tx, p3[1] + ty, z);
+    triangles.push(p1[0], p1[1], z, p2[0], p2[1], z, p3[0], p3[1], z);
   }
 
-  var geom = {lines: lines, triangles: triangles, closed: path.endsWith('Z'), z: z};
-  cache[key] = geom;
+  var geom = {
+    lines: lines,
+    triangles: triangles,
+    closed: path.endsWith('Z'),
+    z: z,
+    key: key
+  };
+
+  context._pathCache[key] = geom;
+  context._pathCacheSize++;
+  if (context._pathCacheSize > 10000) {
+    context._pathCache = {};
+    context._pathCacheSize = 0;
+    console.log('Geometry cache cleared.');
+  }
   return geom;
 }
 
@@ -24696,6 +24706,7 @@ var areahShape  = area$2().y(y$3).x1(x$3).x0(xw).defined(def);
 var lineShape   = line$2().x(x$3).y(y$3).defined(def);
 var trailShape  = vg_trail().x(x$3).y(y$3).defined(def).size(wh);
 var rectShape   = vg_rect().x(x$3).y(y$3).width(w).height(h).cornerRadius(cr);
+var rectShapeGL = vg_rect().x(0).y(0).width(w).height(h).cornerRadius(cr);
 var symbolShape = d3_symbol().type(type$1).size(size);
 function arc$1(context, item) {
   if (context.arc) {
@@ -24722,7 +24733,7 @@ function shape(context, item) {
   if (context.arc) {
     return s.context(context)(item);
   }
-  return geometryForPath(context, s.context(null)(item), 1);
+  return geometryForPath(context, s.context(null)(item), 0.1);
 }
 
 function line$1(context, items) {
@@ -24736,10 +24747,11 @@ function line$1(context, items) {
 }
 
 function rectangle(context, item, x, y) {
-  if (context.arc) {
-    return rectShape.context(context)(item, x, y);
-  }
-  return geometryForPath(context, rectShape.context(null)(item, x, y), 0.1);
+  return rectShape.context(context)(item, x, y);
+}
+
+function rectangleGL(context, item, x, y) {
+  return geometryForPath(context, rectShapeGL.context(null)(item, x, y), 0.1);
 }
 
 function symbol(context, item) {
@@ -25029,34 +25041,48 @@ function translateItem(item) {
 }
 
 function drawGeometry(geom, gl, item) {
-  var opacity = item.opacity == null ? 1 : item.opacity;
+  var opacity = item.opacity == null ? 1 : item.opacity,
+      tx = gl._tx + gl._origin[0],
+      ty = gl._ty + gl._origin[1];
+
   if (opacity <= 0) return;
   if (geom.numTriangles === 0) return;
 
-  gl.bindBuffer(gl.ARRAY_BUFFER, geom.triangleBuffer);
-  gl.vertexAttribPointer(gl._coordLocation, 3, gl.FLOAT, false, 0, 0);
-  gl.enableVertexAttribArray(gl._coordLocation);
+  if (gl._lastTriangleBuffer !== geom.triangleBuffer) {
+    gl.bindBuffer(gl.ARRAY_BUFFER, geom.triangleBuffer);
+    gl.vertexAttribPointer(gl._coordLocation, 3, gl.FLOAT, false, 0, 0);
+    gl.enableVertexAttribArray(gl._coordLocation);
+    gl._lastTriangleBuffer = geom.triangleBuffer;
+  }
 
-  gl.bindBuffer(gl.ARRAY_BUFFER, geom.colorBuffer);
-  gl.vertexAttribPointer(gl._colorLocation, 4, gl.FLOAT, false, 0, 0);
-  gl.enableVertexAttribArray(gl._colorLocation);
+  if (gl._lastColorBuffer !== geom.colorBuffer) {
+    gl.bindBuffer(gl.ARRAY_BUFFER, geom.colorBuffer);
+    gl.vertexAttribPointer(gl._colorLocation, 4, gl.FLOAT, false, 0, 0);
+    gl.enableVertexAttribArray(gl._colorLocation);
+    gl._lastColorBuffer = geom.colorBuffer;
+  }
+
+  gl.uniform2fv(gl._offsetLocation, [tx, ty]);
 
   gl.drawArrays(gl.TRIANGLES, 0, geom.numTriangles * 3);
 }
 
-var cache$1 = {};
+var cache = {};
 
 function color$2(context, item, value) {
+  if (!value) {
+    return [1.0, 1.0, 1.0];
+  }
   if (value.id) {
     // TODO: support gradients
     return [1.0, 1.0, 1.0];
   }
-  if (cache$1[value]) {
-    return cache$1[value];
+  if (cache[value]) {
+    return cache[value];
   }
   var rgb = color(value).rgb();
-  cache$1[value] = [rgb.r / 255, rgb.g / 255, rgb.b / 255];
-  return cache$1[value];
+  cache[value] = [rgb.r / 255, rgb.g / 255, rgb.b / 255];
+  return cache[value];
 }
 
 var __moduleExports$10 = function numtype(num, def) {
@@ -25430,29 +25456,40 @@ function extrusions(positions, point, normal, scale) {
 var index$6 = Stroke
 
 function geometryForItem(context, item, shapeGeom, opacity) {
-  var triangles = [];
-  var colors = [];
-  var z = shapeGeom.z || 0,
-      st = shapeGeom.triangles;
-
-  var i, len, c, li, ci;
+  var lw = (lw = item.strokeWidth) != null ? lw : 1,
+      lc = (lc = item.strokeCap) != null ? lc : 'butt';
+  var strokeMeshes = [];
+  var i, len, c, li, ci, mesh, triangles, colors, cell, p1, p2, p3, mp, mc, mcl,
+      triangleBuffer, colorBuffer, n = 0, fill = false, stroke = false, v;
   var opacity = item.opacity == null ? 1 : item.opacity;
   var fillOpacity = opacity * (item.fillOpacity==null ? 1 : item.fillOpacity);
-  var n = 0;
-  var fill = false;
-  if (item.fill && fillOpacity > 0 && item.fill !== 'transparent') {
+  var triangles = [];
+  var colors = [];
+  var strokeOpacity = opacity * (item.strokeOpacity==null ? 1 : item.strokeOpacity),
+      strokeExtrude,
+      z = shapeGeom.z || 0,
+      st = shapeGeom.triangles,
+      val,
+      key = shapeGeom.key + ';' + lw + ';' + lc + ';' + closed + ';' + item.fill + ';' + item.fillOpacity + ';' + item.stroke + ';' + item.strokeOpacity;
+
+  if (context._itemCache[key]) {
+    return context._itemCache[key];
+  }
+
+  if (item.fill === 'transparent') {
+    fillOpacity = 0;
+  }
+  if (item.fill && fillOpacity > 0) {
     fill = true;
     n = st ? st.length / 9 : 0;
   }
 
-  var strokeOpacity = opacity * (item.strokeOpacity==null ? 1 : item.strokeOpacity);
-  var lw = (lw = item.strokeWidth) != null ? lw : 1,
-      lc = (lc = item.strokeCap) != null ? lc : 'butt';
-  var stroke = false;
-  var strokeMeshes = [];
-  if (lw > 0 && item.stroke && strokeOpacity > 0 && item.stroke !== 'transparent') {
+  if (item.stroke === 'transparent') {
+    strokeOpacity = 0;
+  }
+  if (lw > 0 && item.stroke && strokeOpacity > 0) {
     stroke = true;
-    var strokeExtrude = index$6({
+    strokeExtrude = index$6({
         thickness: lw,
         cap: lc,
         join: 'miter',
@@ -25460,19 +25497,21 @@ function geometryForItem(context, item, shapeGeom, opacity) {
         closed: !!shapeGeom.closed
     });
     for (li = 0; li < shapeGeom.lines.length; li++) {
-      var mesh = strokeExtrude.build(shapeGeom.lines[li]);
+      mesh = strokeExtrude.build(shapeGeom.lines[li]);
       strokeMeshes.push(mesh);
       n += mesh.cells.length;
     }
   }
 
-  var triangles = new Float32Array(n * 3 * 3);
-  var colors = new Float32Array(n * 3 * 4);
+  triangles = new Float32Array(n * 3 * 3);
+  colors = new Float32Array(n * 3 * 4);
 
   if (fill) {
     c = color$2(context, item, item.fill);
-    for (i = 0, len = st.length; i < len; i++) {
-      triangles[i] = st[i];
+    for (i = 0, len = st.length; i < len; i += 3) {
+      triangles[i    ] = st[i    ];
+      triangles[i + 1] = st[i + 1];
+      triangles[i + 2] = st[i + 2];
     }
     for (i = 0, len = st.length / 3; i < len; i++) {
       colors[i*4    ] = c[0];
@@ -25482,23 +25521,21 @@ function geometryForItem(context, item, shapeGeom, opacity) {
     }
   }
 
-  var tx = context._tx + context._origin[0],
-      ty = context._ty + context._origin[1];
   if (stroke) {
     c = color$2(context, item, item.stroke);
     i = fill ? st.length / 3 : 0;
     for (li = 0; li < strokeMeshes.length; li++) {
-      var mesh = strokeMeshes[li],
-          mp = mesh.positions,
-          mc = mesh.cells,
-          mcl = mesh.cells.length;
+      mesh = strokeMeshes[li],
+      mp = mesh.positions,
+      mc = mesh.cells,
+      mcl = mesh.cells.length;
       for (ci = 0; ci < mcl; ci++) {
-        var cell = mc[ci];
-        var p1 = mp[cell[0]];
-        var p2 = mp[cell[1]];
-        var p3 = mp[cell[2]];
-        triangles[i*3    ] = p1[0] + tx;
-        triangles[i*3 + 1] = p1[1] + ty;
+        cell = mc[ci];
+        p1 = mp[cell[0]];
+        p2 = mp[cell[1]];
+        p3 = mp[cell[2]];
+        triangles[i*3    ] = p1[0];
+        triangles[i*3 + 1] = p1[1];
         triangles[i*3 + 2] = z;
         colors[i*4    ] = c[0];
         colors[i*4 + 1] = c[1];
@@ -25506,8 +25543,8 @@ function geometryForItem(context, item, shapeGeom, opacity) {
         colors[i*4 + 3] = strokeOpacity;
         i++;
 
-        triangles[i*3    ] = p2[0] + tx;
-        triangles[i*3 + 1] = p2[1] + ty;
+        triangles[i*3    ] = p2[0];
+        triangles[i*3 + 1] = p2[1];
         triangles[i*3 + 2] = z;
         colors[i*4    ] = c[0];
         colors[i*4 + 1] = c[1];
@@ -25515,8 +25552,8 @@ function geometryForItem(context, item, shapeGeom, opacity) {
         colors[i*4 + 3] = strokeOpacity;
         i++;
 
-        triangles[i*3    ] = p3[0] + tx;
-        triangles[i*3 + 1] = p3[1] + ty;
+        triangles[i*3    ] = p3[0];
+        triangles[i*3 + 1] = p3[1];
         triangles[i*3 + 2] = z;
         colors[i*4    ] = c[0];
         colors[i*4 + 1] = c[1];
@@ -25527,19 +25564,36 @@ function geometryForItem(context, item, shapeGeom, opacity) {
     }
   }
 
-  var triangleBuffer = context.createBuffer();
+  triangleBuffer = context.createBuffer();
   context.bindBuffer(context.ARRAY_BUFFER, triangleBuffer);
   context.bufferData(context.ARRAY_BUFFER, triangles, context.STATIC_DRAW);
 
-  var colorBuffer = context.createBuffer();
+  colorBuffer = context.createBuffer();
   context.bindBuffer(context.ARRAY_BUFFER, colorBuffer);
   context.bufferData(context.ARRAY_BUFFER, colors, context.STATIC_DRAW);
 
-  return {
+  val = {
     triangleBuffer: triangleBuffer,
     colorBuffer: colorBuffer,
     numTriangles: n
   };
+  if (context._itemCacheSize > 10000) {
+    for (v in context._itemCache) {
+      if (context._itemCache.hasOwnProperty(v)) {
+        context.deleteBuffer(context._itemCache[v].triangleBuffer);
+        context.deleteBuffer(context._itemCache[v].colorBuffer);
+        context._itemCache[v].deleted = true;
+      }
+    }
+    context._lastColorBuffer = null;
+    context._lastTriangleBuffer = null;
+    context._itemCache = {};
+    context._itemCacheSize = 0;
+    console.log('Item geometry cache cleared.');
+  }
+  context._itemCache[key] = val;
+  context._itemCacheSize++;
+  return val;
 }
 
 function markItemPath(type, shape) {
@@ -25574,11 +25628,7 @@ function markItemPath(type, shape) {
       context._tx += x;
       context._ty += y;
 
-      if (context._fullRedraw || item._dirty || !item._geom) {
-        if (item._geom) {
-          context.deleteBuffer(item._geom.triangleBuffer);
-          context.deleteBuffer(item._geom.colorBuffer);
-        }
+      if (context._fullRedraw || item._dirty || !item._geom || item._geom.deleted) {
         var shapeGeom = shape(context, item);
         item._geom = geometryForItem(context, item, shapeGeom);
       }
@@ -25650,11 +25700,7 @@ function markMultiItemPath(type, shape) {
           break;
         }
       }
-      if (context._fullRedraw || dirty || !item._geom) {
-        if (item._geom) {
-          context.deleteBuffer(item._geom.triangleBuffer);
-          context.deleteBuffer(item._geom.colorBuffer);
-        }
+      if (context._fullRedraw || dirty || !item._geom || item._geom.deleted) {
         var shapeGeom = shape(context, scene.items);
         item._geom = geometryForItem(context, item, shapeGeom);
       }
@@ -25828,13 +25874,9 @@ function drawGL(context, scene, bounds) {
     context._textContext.translate(gx, gy);
 
     // draw group background
-    if (context._fullRedraw || group._dirty || !group._geom) {
-      if (group._geom) {
-        context.deleteBuffer(group._geom.triangleBuffer);
-        context.deleteBuffer(group._geom.colorBuffer);
-      }
+    if (context._fullRedraw || group._dirty || !group._geom || group._geom.deleted) {
       offset = group.stroke ? 0.5 : 0;
-      var shapeGeom = rectangle(context, group, offset, offset);
+      var shapeGeom = rectangleGL(context, group, offset, offset);
       group._geom = geometryForItem(context, group, shapeGeom);
     }
     drawGeometry(group._geom, context, group);
@@ -26164,11 +26206,7 @@ function drawGL$2(context, scene, bounds) {
     context._tx += x;
     context._ty += y;
 
-    if (context._fullRedraw || item._dirty || !item._geom) {
-      if (item._geom) {
-        context.deleteBuffer(item._geom.triangleBuffer);
-        context.deleteBuffer(item._geom.colorBuffer);
-      }
+    if (context._fullRedraw || item._dirty || !item._geom || item._geom.deleted) {
       var shapeGeom = geometryForPath(context, path);
       item._geom = geometryForItem(context, item, shapeGeom);
     }
@@ -26219,15 +26257,20 @@ function drawGL$3(context, scene, bounds) {
   visit(scene, function(item) {
     if (bounds && !bounds.intersects(item.bounds)) return; // bounds check
 
-    if (context._fullRedraw || item._dirty || !item._geom) {
-      if (item._geom) {
-        context.deleteBuffer(item._geom.triangleBuffer);
-        context.deleteBuffer(item._geom.colorBuffer);
-      }
-      var shapeGeom = rectangle(context, item);
+    var x = item.x || 0,
+        y = item.y || 0;
+
+    context._tx += x;
+    context._ty += y;
+
+    if (context._fullRedraw || item._dirty || !item._geom || item._geom.deleted) {
+      var shapeGeom = rectangleGL(context, item);
       item._geom = geometryForItem(context, item, shapeGeom);
     }
     drawGeometry(item._geom, context, item);
+
+    context._tx -= x;
+    context._ty -= y;
   });
 }
 
@@ -26293,11 +26336,7 @@ function drawGL$4(context, scene, bounds) {
   visit(scene, function(item) {
     var x1, y1, x2, y2, line, shapeGeom;
     if (bounds && !bounds.intersects(item.bounds)) return; // bounds check
-    if (context._fullRedraw || item._dirty || !item._geom) {
-      if (item._geom) {
-        context.deleteBuffer(item._geom.triangleBuffer);
-        context.deleteBuffer(item._geom.colorBuffer);
-      }
+    if (context._fullRedraw || item._dirty || !item._geom || item._geom.deleted) {
       x1 = item.x || 0;
       y1 = item.y || 0;
       x2 = item.x2 != null ? item.x2 : x1;
@@ -26306,6 +26345,7 @@ function drawGL$4(context, scene, bounds) {
         lines: [[[x1, y1], [x2, y2]]],
         closed: false
       };
+      shapeGeom.key = JSON.stringify(shapeGeom.lines);
       item._geom = geometryForItem(context, item, shapeGeom);
     }
     drawGeometry(item._geom, context, item);
@@ -26898,6 +26938,11 @@ function WebGL$1(w, h) {
 
   var gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
 
+  gl._pathCache = {};
+  gl._pathCacheSize = 0;
+  gl._itemCache = {};
+  gl._itemCacheSize = 0;
+
   gl._textCanvas = document.createElement('canvas');
   gl._textCanvas.width = w;
   gl._textCanvas.height = h;
@@ -26917,9 +26962,10 @@ function WebGL$1(w, h) {
     'attribute vec4 color;' +
     'uniform mat4 matrix;' +
     'uniform float zFactor;' +
+    'uniform vec2 offset;' +
     'varying vec4 vColor;' +
     'void main(void) {' +
-       ' gl_Position = matrix * vec4(coordinates.x, coordinates.y, coordinates.z*zFactor - 1.0, 1.0);' +
+       ' gl_Position = matrix * vec4(coordinates.x + offset.x, coordinates.y + offset.y, coordinates.z*zFactor - 1.0, 1.0);' +
        ' vColor = color;' +
     '}';
   var vertShader = gl.createShader(gl.VERTEX_SHADER);
@@ -26952,6 +26998,7 @@ function WebGL$1(w, h) {
   gl._colorLocation = gl.getAttribLocation(gl._shaderProgram, 'color');
   gl._matrixLocation = gl.getUniformLocation(gl._shaderProgram, 'matrix');
   gl._zFactorLocation = gl.getUniformLocation(gl._shaderProgram, 'zFactor');
+  gl._offsetLocation = gl.getUniformLocation(gl._shaderProgram, 'offset');
 
 // -------------------------------------------------------------------------
 // BEGIN: Adapted from https://github.com/greggman/webgl-fundamentals
@@ -32457,7 +32504,7 @@ function addSortField(scope, p, sort) {
   }
 }
 
-function cache$2(scope, ds, name, optype, field, counts, index) {
+function cache$1(scope, ds, name, optype, field, counts, index) {
   var cache = ds[name] || (ds[name] = {}),
       sort = sortKey(counts),
       k = fieldKey(field), v, op;
@@ -32486,23 +32533,23 @@ prototype$70.tuplesRef = function() {
 };
 
 prototype$70.extentRef = function(scope, field) {
-  return cache$2(scope, this, 'extent', 'Extent', field, false);
+  return cache$1(scope, this, 'extent', 'Extent', field, false);
 };
 
 prototype$70.domainRef = function(scope, field) {
-  return cache$2(scope, this, 'domain', 'Values', field, false);
+  return cache$1(scope, this, 'domain', 'Values', field, false);
 };
 
 prototype$70.valuesRef = function(scope, field, sort) {
-  return cache$2(scope, this, 'vals', 'Values', field, sort || true);
+  return cache$1(scope, this, 'vals', 'Values', field, sort || true);
 };
 
 prototype$70.lookupRef = function(scope, field) {
-  return cache$2(scope, this, 'lookup', 'TupleIndex', field, false);
+  return cache$1(scope, this, 'lookup', 'TupleIndex', field, false);
 };
 
 prototype$70.indataRef = function(scope, field) {
-  return cache$2(scope, this, 'indata', 'TupleIndex', field, true, true);
+  return cache$1(scope, this, 'indata', 'TupleIndex', field, true, true);
 };
 
 function parseFacet(spec, scope, group) {
