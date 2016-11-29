@@ -154,7 +154,7 @@
       "encode": {
         "enter": {
           "fill": {"value": "#dedede"},
-          "stroke": {"value": "white"}
+          "stroke": {"value": "black"}
         },
         "update": {
           "path": {"field": "path"}
@@ -166,10 +166,12 @@
       "from": {"data": "airports"},
       "encode": {
         "enter": {
-          "size": {"value": 255},
+          "size": {"scale": "size", "field": "traffic.flights"},
           "fill": {"value": "steelblue"},
           "fillOpacity": {"value": 0.8},
-          "shape": {"value": "cross"}
+          "stroke": {"value": "white"},
+          "strokeWidth": {"value": 1.5},
+          "shape": {"value": "circle"}
         },
         "update": {
           "x": {"field": "x"},
