@@ -24628,8 +24628,10 @@ var index$5 = function(contours, opt) {
 function geometryForPath(context, path, threshold) {
   var key = path;
   if (context._pathCache[key]) {
+    context._pathCacheHit++;
     return context._pathCache[key];
   }
+  context._pathCacheMiss++;
 
   threshold = threshold || 1.0;
   if (!path) {
@@ -24709,7 +24711,7 @@ var rectShape   = vg_rect().x(x$3).y(y$3).width(w).height(h).cornerRadius(cr);
 var rectShapeGL = vg_rect().x(0).y(0).width(w).height(h).cornerRadius(cr);
 var symbolShape = d3_symbol().type(type$1).size(size);
 function arc$1(context, item) {
-  if (context.arc) {
+  if (!context || context.arc) {
     return arcShape.context(context)(item);
   }
   return geometryForPath(context, arcShape.context(null)(item), 0.1);
@@ -24722,7 +24724,7 @@ function area$1(context, items) {
         : (item.orient === 'horizontal' ? areahShape : areavShape)
             .curve(curves(interp, item.orient, item.tension))
       )
-  if (context.arc) {
+  if (!context || context.arc) {
     return s.context(context)(items);
   }
   return geometryForPath(context, s.context(null)(items), 0.1);
@@ -24730,7 +24732,7 @@ function area$1(context, items) {
 
 function shape(context, item) {
   var s = item.mark.shape || item.shape;
-  if (context.arc) {
+  if (!context || context.arc) {
     return s.context(context)(item);
   }
   return geometryForPath(context, s.context(null)(item), 0.1);
@@ -24740,7 +24742,7 @@ function line$1(context, items) {
   var item = items[0],
       interp = item.interpolate || 'linear',
       s = lineShape.curve(curves(interp, item.orient, item.tension));
-  if (context.arc) {
+  if (!context || context.arc) {
     return s.context(context)(items);
   }
   return geometryForPath(context, s.context(null)(items));
@@ -24755,7 +24757,7 @@ function rectangleGL(context, item, x, y) {
 }
 
 function symbol(context, item) {
-  if (context.arc) {
+  if (!context || context.arc) {
     return symbolShape.context(context)(item);
   }
   return geometryForPath(context, symbolShape.context(null)(item), 0.1);
@@ -25048,21 +25050,20 @@ function drawGeometry(geom, gl, item) {
   if (opacity <= 0) return;
   if (geom.numTriangles === 0) return;
 
-  if (gl._lastTriangleBuffer !== geom.triangleBuffer) {
-    gl.bindBuffer(gl.ARRAY_BUFFER, geom.triangleBuffer);
-    gl.vertexAttribPointer(gl._coordLocation, 3, gl.FLOAT, false, 0, 0);
-    gl.enableVertexAttribArray(gl._coordLocation);
-    gl._lastTriangleBuffer = geom.triangleBuffer;
-  }
+  gl.useProgram(gl._shaderProgram);
 
-  if (gl._lastColorBuffer !== geom.colorBuffer) {
-    gl.bindBuffer(gl.ARRAY_BUFFER, geom.colorBuffer);
-    gl.vertexAttribPointer(gl._colorLocation, 4, gl.FLOAT, false, 0, 0);
-    gl.enableVertexAttribArray(gl._colorLocation);
-    gl._lastColorBuffer = geom.colorBuffer;
-  }
+  gl.bindBuffer(gl.ARRAY_BUFFER, geom.triangleBuffer);
+  gl.vertexAttribPointer(gl._coordLocation, 3, gl.FLOAT, false, 0, 0);
+  gl.enableVertexAttribArray(gl._coordLocation);
+  gl._lastTriangleBuffer = geom.triangleBuffer;
+
+  gl.bindBuffer(gl.ARRAY_BUFFER, geom.colorBuffer);
+  gl.vertexAttribPointer(gl._colorLocation, 4, gl.FLOAT, false, 0, 0);
+  gl.enableVertexAttribArray(gl._colorLocation);
+  gl._lastColorBuffer = geom.colorBuffer;
 
   gl.uniform2fv(gl._offsetLocation, [tx, ty]);
+  gl.uniform4fv(gl._clipLocation, gl._clip);
 
   gl.drawArrays(gl.TRIANGLES, 0, geom.numTriangles * 3);
 }
@@ -25472,10 +25473,6 @@ function geometryForItem(context, item, shapeGeom, opacity) {
       val,
       key = shapeGeom.key + ';' + lw + ';' + lc + ';' + closed + ';' + item.fill + ';' + item.fillOpacity + ';' + item.stroke + ';' + item.strokeOpacity;
 
-  if (context._itemCache[key]) {
-    return context._itemCache[key];
-  }
-
   if (item.fill === 'transparent') {
     fillOpacity = 0;
   }
@@ -25493,7 +25490,7 @@ function geometryForItem(context, item, shapeGeom, opacity) {
         thickness: lw,
         cap: lc,
         join: 'miter',
-        miterLimit: 10,
+        miterLimit: 1,
         closed: !!shapeGeom.closed
     });
     for (li = 0; li < shapeGeom.lines.length; li++) {
@@ -25577,22 +25574,16 @@ function geometryForItem(context, item, shapeGeom, opacity) {
     colorBuffer: colorBuffer,
     numTriangles: n
   };
-  if (context._itemCacheSize > 10000) {
-    for (v in context._itemCache) {
-      if (context._itemCache.hasOwnProperty(v)) {
-        context.deleteBuffer(context._itemCache[v].triangleBuffer);
-        context.deleteBuffer(context._itemCache[v].colorBuffer);
-        context._itemCache[v].deleted = true;
-      }
+
+  if (item._geom) {
+    if (item._geom.triangleBuffer) {
+      context.deleteBuffer(item._geom.triangleBuffer);
     }
-    context._lastColorBuffer = null;
-    context._lastTriangleBuffer = null;
-    context._itemCache = {};
-    context._itemCacheSize = 0;
-    console.log('Item geometry cache cleared.');
+    if (item._geom.colorBuffer) {
+      context.deleteBuffer(item._geom.colorBuffer);
+    }
   }
-  context._itemCache[key] = val;
-  context._itemCacheSize++;
+
   return val;
 }
 
@@ -25623,13 +25614,14 @@ function markItemPath(type, shape) {
       if (bounds && !bounds.intersects(item.bounds)) return; // bounds check
 
       var x = item.x || 0,
-          y = item.y || 0;
+          y = item.y || 0,
+          i, shapeGeom;
 
       context._tx += x;
       context._ty += y;
 
       if (context._fullRedraw || item._dirty || !item._geom || item._geom.deleted) {
-        var shapeGeom = shape(context, item);
+        shapeGeom = shape(context, item);
         item._geom = geometryForItem(context, item, shapeGeom);
       }
       drawGeometry(item._geom, context, item);
@@ -25865,7 +25857,7 @@ function drawGL(context, scene, bounds) {
         gy = group.y || 0,
         w = group.width || 0,
         h = group.height || 0,
-        offset, opacity;
+        offset, opacity, oldClip;
 
     // setup graphics context
     context._tx += gx;
@@ -25883,7 +25875,13 @@ function drawGL(context, scene, bounds) {
 
     // set clip and bounds
     if (group.clip) {
-      // TODO: do something here in webgl?
+      oldClip = context._clip;
+      context._clip = [
+        context._origin[0] + context._tx,
+        context._origin[1] + context._ty,
+        context._origin[0] + context._tx + w,
+        context._origin[1] + context._ty + h
+      ];
     }
     if (bounds) bounds.translate(-gx, -gy);
 
@@ -25894,6 +25892,9 @@ function drawGL(context, scene, bounds) {
 
     // restore graphics context
     if (bounds) bounds.translate(gx, gy);
+    if (group.clip) {
+      context._clip = oldClip;
+    }
 
     context._tx -= gx;
     context._ty -= gy;
@@ -26253,25 +26254,199 @@ function draw$2(context, item) {
   rectangle(context, item);
 }
 
-function drawGL$3(context, scene, bounds) {
-  visit(scene, function(item) {
-    if (bounds && !bounds.intersects(item.bounds)) return; // bounds check
+function drawGL$3(gl, scene, bounds) {
+  var unit, pos, size,
+      strokeWidth, strokeOpacity, strokeColor,
+      fillOpacity, fillColor, cornerRadius,
+      unitBuffer, posBuffer, sizeBuffer,
+      strokeWidthBuffer, strokeOpacityBuffer, strokeColorBuffer,
+      fillOpacityBuffer, fillColorBuffer, cornerRadiusBuffer,
+      ivpf = 0, ivpf2 = 0, ivpf3 = 0,
+      numPts = scene.items.length,
+      unitItem, j, anyGradients = false, ci,
+      sg = scene._rectGeom;
 
-    var x = item.x || 0,
-        y = item.y || 0;
-
-    context._tx += x;
-    context._ty += y;
-
-    if (context._fullRedraw || item._dirty || !item._geom || item._geom.deleted) {
-      var shapeGeom = rectangleGL(context, item);
-      item._geom = geometryForItem(context, item, shapeGeom);
+  for (j = 0; j < scene.items.length; ++j) {
+    ci = scene.items[j];
+    if ((ci.stroke && ci.stroke.id) || (ci.fill && ci.fill.id)) {
+      anyGradients = true;
+      break;
     }
-    drawGeometry(item._geom, context, item);
+  }
+  if (anyGradients) {
+    drawAll(draw$2)(gl._textContext, scene, bounds);
+    return;
+  }
 
-    context._tx -= x;
-    context._ty -= y;
+  if (sg && sg.numPts === numPts) {
+    unit = sg.unit;
+    unitBuffer = sg.unitBuffer;
+    pos = sg.pos;
+    size = sg.size;
+    strokeWidth = sg.strokeWidth;
+    strokeOpacity = sg.strokeOpacity;
+    strokeColor = sg.strokeColor;
+    fillOpacity = sg.fillOpacity;
+    fillColor = sg.fillColor;
+    cornerRadius = sg.cornerRadius;
+  } else {
+    if (sg) {
+      gl.deleteBuffer(sg.unitBuffer);
+    }
+    unit = new Float32Array(6 * numPts * 2);
+    pos = new Float32Array(6 * numPts * 3);
+    size = new Float32Array(6 * numPts * 2);
+    strokeWidth = new Float32Array(6 * numPts);
+    strokeOpacity = new Float32Array(6 * numPts);
+    strokeColor = new Float32Array(6 * numPts * 3);
+    fillOpacity = new Float32Array(6 * numPts);
+    fillColor = new Float32Array(6 * numPts * 3);
+    cornerRadius = new Float32Array(6 * numPts);
+
+    unitItem = [
+      0, 1,
+      1, 1,
+      1, 0,
+      1, 0,
+      0, 0,
+      0, 1
+    ];
+    for (j = 0; j < numPts * unitItem.length; j += 1) {
+      unit[j] = unitItem[j % unitItem.length];
+    }
+  }
+
+  if (sg) {
+    gl.deleteBuffer(sg.posBuffer);
+    gl.deleteBuffer(sg.sizeBuffer);
+    gl.deleteBuffer(sg.strokeWidthBuffer);
+    gl.deleteBuffer(sg.strokeOpacityBuffer);
+    gl.deleteBuffer(sg.strokeColorBuffer);
+    gl.deleteBuffer(sg.fillOpacityBuffer);
+    gl.deleteBuffer(sg.fillColorBuffer);
+    gl.deleteBuffer(sg.cornerRadiusBuffer);
+  }
+
+  visit(scene, function(item) {
+    var x = (item.x || 0) + gl._tx + gl._origin[0],
+        y = (item.y || 0) + gl._ty + gl._origin[1],
+        fc = color$2(gl, item, item.fill),
+        sc = color$2(gl, item, item.stroke),
+        op = item.opacity == null ? 1 : item.opacity,
+        fo = op * ((item.fill == null || item.fill == 'transparent') ? 0 : 1) * (item.fillOpacity == null ? 1 : item.fillOpacity),
+        so = op * ((item.stroke == null || item.stroke == 'transparent') ? 0 : 1) * (item.strokeOpacity == null ? 1 : item.strokeOpacity),
+        sw = ((item.stroke == null || item.stroke == 'transparent') ? 0 : 1) * (item.strokeWidth == null ? 1 : item.strokeWidth),
+        sx = (item.width == null ? 0 : item.width),
+        sy = (item.height == null ? 0 : item.height),
+        cr = (item.cornerRadius == null ? 0 : item.cornerRadius);
+
+    for (j = 0; j < 6; j += 1, ivpf += 1, ivpf2 += 2, ivpf3 += 3) {
+      pos[ivpf3] = x;
+      pos[ivpf3 + 1] = y;
+      pos[ivpf3 + 2] = 0;
+      size[ivpf2] = sx;
+      size[ivpf2 + 1] = sy;
+      strokeWidth[ivpf] = sw;
+      strokeOpacity[ivpf] = so;
+      strokeColor[ivpf3] = sc[0];
+      strokeColor[ivpf3 + 1] = sc[1];
+      strokeColor[ivpf3 + 2] = sc[2];
+      fillOpacity[ivpf] = fo;
+      fillColor[ivpf3] = fc[0];
+      fillColor[ivpf3 + 1] = fc[1];
+      fillColor[ivpf3 + 2] = fc[2];
+      cornerRadius[ivpf] = cr;
+    }
   });
+
+  gl.useProgram(gl._rectShaderProgram);
+
+  if (!unitBuffer) {
+    unitBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, unitBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, unit, gl.STATIC_DRAW);
+    gl.vertexAttribPointer(gl._rectUnitLocation, 2, gl.FLOAT, false, 0, 0);
+    gl.enableVertexAttribArray(gl._rectUnitLocation);
+  } else {
+    gl.bindBuffer(gl.ARRAY_BUFFER, unitBuffer);
+    gl.vertexAttribPointer(gl._rectUnitLocation, 2, gl.FLOAT, false, 0, 0);
+    gl.enableVertexAttribArray(gl._rectUnitLocation);
+  }
+
+  posBuffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, posBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER, pos, gl.STATIC_DRAW);
+  gl.vertexAttribPointer(gl._rectPosLocation, 3, gl.FLOAT, false, 0, 0);
+  gl.enableVertexAttribArray(gl._rectPosLocation);
+
+  sizeBuffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, sizeBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER, size, gl.STATIC_DRAW);
+  gl.vertexAttribPointer(gl._rectSizeLocation, 2, gl.FLOAT, false, 0, 0);
+  gl.enableVertexAttribArray(gl._rectSizeLocation);
+
+  strokeWidthBuffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, strokeWidthBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER, strokeWidth, gl.STATIC_DRAW);
+  gl.vertexAttribPointer(gl._rectStrokeWidthLocation, 1, gl.FLOAT, false, 0, 0);
+  gl.enableVertexAttribArray(gl._rectStrokeWidthLocation);
+
+  strokeOpacityBuffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, strokeOpacityBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER, strokeOpacity, gl.STATIC_DRAW);
+  gl.vertexAttribPointer(gl._rectStrokeOpacityLocation, 1, gl.FLOAT, false, 0, 0);
+  gl.enableVertexAttribArray(gl._rectStrokeOpacityLocation);
+
+  strokeColorBuffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, strokeColorBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER, strokeColor, gl.STATIC_DRAW);
+  gl.vertexAttribPointer(gl._rectStrokeColorLocation, 3, gl.FLOAT, false, 0, 0);
+  gl.enableVertexAttribArray(gl._rectStrokeColorLocation);
+
+  fillOpacityBuffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, fillOpacityBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER, fillOpacity, gl.STATIC_DRAW);
+  gl.vertexAttribPointer(gl._rectFillOpacityLocation, 1, gl.FLOAT, false, 0, 0);
+  gl.enableVertexAttribArray(gl._rectFillOpacityLocation);
+
+  fillColorBuffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, fillColorBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER, fillColor, gl.STATIC_DRAW);
+  gl.vertexAttribPointer(gl._rectFillColorLocation, 3, gl.FLOAT, false, 0, 0);
+  gl.enableVertexAttribArray(gl._rectFillColorLocation);
+
+  cornerRadiusBuffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, cornerRadiusBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER, cornerRadius, gl.STATIC_DRAW);
+  gl.vertexAttribPointer(gl._rectCornerRadiusLocation, 1, gl.FLOAT, false, 0, 0);
+  gl.enableVertexAttribArray(gl._rectCornerRadiusLocation);
+
+  gl.uniformMatrix4fv(gl._rectMatrixLocation, false, gl._matrix);
+  gl.uniform4fv(gl._rectClipLocation, gl._clip);
+
+  gl.drawArrays(gl.TRIANGLES, 0, numPts * 6);
+
+  scene._rectGeom = {
+    numPts: numPts,
+    unit: unit,
+    pos: pos,
+    size: size,
+    strokeWidth: strokeWidth,
+    strokeOpacity: strokeOpacity,
+    strokeColor: strokeColor,
+    fillOpacity: fillOpacity,
+    fillColor: fillColor,
+    cornerRadius: cornerRadius,
+    unitBuffer: unitBuffer,
+    posBuffer: posBuffer,
+    sizeBuffer: sizeBuffer,
+    strokeWidthBuffer: strokeWidthBuffer,
+    strokeOpacityBuffer: strokeOpacityBuffer,
+    strokeColorBuffer: strokeColorBuffer,
+    fillOpacityBuffer: fillOpacityBuffer,
+    fillColorBuffer: fillColorBuffer,
+    cornerRadiusBuffer: cornerRadiusBuffer
+  };
 }
 
 var rect = {
@@ -26365,7 +26540,232 @@ var rule = {
 
 var shape$1 = markItemPath('shape', shape);
 
-var symbol$1 = markItemPath('symbol', symbol);
+function attr$5(emit, item) {
+  emit('transform', translateItem(item));
+  emit('d', symbol(null, item));
+}
+
+function bound$5(bounds, item) {
+  symbol(context(bounds), item);
+  return boundStroke(bounds, item)
+    .translate(item.x || 0, item.y || 0);
+}
+
+function draw$4(context, item) {
+  var x = item.x || 0,
+      y = item.y || 0;
+  context.translate(x, y);
+  context.beginPath();
+  symbol(context, item);
+  context.translate(-x, -y);
+}
+
+function drawGL$5(gl, scene, bounds) {
+  var unit, pos, size, shape,
+      strokeWidth, strokeOpacity, strokeColor,
+      fillOpacity, fillColor,
+      unitBuffer, posBuffer, sizeBuffer, shapeBuffer,
+      strokeWidthBuffer, strokeOpacityBuffer, strokeColorBuffer,
+      fillOpacityBuffer, fillColorBuffer,
+      ivpf = 0, ivpf3 = 0,
+      numPts = scene.items.length,
+      xu = 0, yu = 0, w = 1, h = 1, j, unitItem,
+      sg = scene._symbolGeom, shapeIndex;
+
+  if (numPts === 0) {
+    return;
+  }
+
+  shapeIndex = {
+    circle: 0,
+    cross: 1,
+    diamond: 2,
+    square: 3,
+    star: 4,
+    triangle: 5,
+    'triangle-up': 5,
+    'triangle-right': 6,
+    'triangle-down': 7,
+    'triangle-left': 8,
+    wye: 9
+  };
+
+  if (sg && sg.numPts === numPts) {
+    unit = sg.unit;
+    unitBuffer = sg.unitBuffer;
+    pos = sg.pos;
+    size = sg.size;
+    shape = sg.shape;
+    strokeWidth = sg.strokeWidth;
+    strokeOpacity = sg.strokeOpacity;
+    strokeColor = sg.strokeColor;
+    fillOpacity = sg.fillOpacity;
+    fillColor = sg.fillColor;
+  } else {
+    if (sg) {
+      gl.deleteBuffer(sg.unitBuffer);
+    }
+    unit = new Float32Array(3 * numPts * 2);
+    pos = new Float32Array(3 * numPts * 3);
+    size = new Float32Array(3 * numPts);
+    shape = new Float32Array(3 * numPts);
+    strokeWidth = new Float32Array(3 * numPts);
+    strokeOpacity = new Float32Array(3 * numPts);
+    strokeColor = new Float32Array(3 * numPts * 3);
+    fillOpacity = new Float32Array(3 * numPts);
+    fillColor = new Float32Array(3 * numPts * 3);
+
+    unitItem = [
+      xu, yu - h * 2,
+      xu - w * Math.sqrt(3.0), yu + h,
+      xu + w * Math.sqrt(3.0), yu + h
+    ];
+    for (j = 0; j < numPts * unitItem.length; j += 1) {
+      unit[j] = unitItem[j % unitItem.length];
+    }
+  }
+
+  if (sg) {
+    gl.deleteBuffer(sg.posBuffer);
+    gl.deleteBuffer(sg.sizeBuffer);
+    gl.deleteBuffer(sg.shapeBuffer);
+    gl.deleteBuffer(sg.strokeWidthBuffer);
+    gl.deleteBuffer(sg.strokeOpacityBuffer);
+    gl.deleteBuffer(sg.strokeColorBuffer);
+    gl.deleteBuffer(sg.fillOpacityBuffer);
+    gl.deleteBuffer(sg.fillColorBuffer);
+  }
+
+  visit(scene, function(item) {
+    var x = (item.x || 0) + gl._tx + gl._origin[0],
+        y = (item.y || 0) + gl._ty + gl._origin[1],
+        fc = color$2(gl, item, item.fill),
+        sc = color$2(gl, item, item.stroke),
+        op = item.opacity == null ? 1 : item.opacity,
+        fo = op * ((item.fill == null || item.fill == 'transparent') ? 0 : 1) * (item.fillOpacity == null ? 1 : item.fillOpacity),
+        so = op * ((item.stroke == null || item.stroke == 'transparent') ? 0 : 1) * (item.strokeOpacity == null ? 1 : item.strokeOpacity),
+        sw = ((item.stroke == null || item.stroke == 'transparent') ? 0 : 1) * (item.strokeWidth == null ? 1 : item.strokeWidth),
+        sz = (item.size == null ? 64 : item.size),
+        sh = shapeIndex[item.shape] == undefined ? 0 : shapeIndex[item.shape];
+
+    for (j = 0; j < 3; j += 1, ivpf += 1, ivpf3 += 3) {
+      pos[ivpf3] = x;
+      pos[ivpf3 + 1] = y;
+      pos[ivpf3 + 2] = 0;
+      size[ivpf] = sz;
+      strokeWidth[ivpf] = sw;
+      shape[ivpf] = sh;
+      strokeOpacity[ivpf] = so;
+      strokeColor[ivpf3] = sc[0];
+      strokeColor[ivpf3 + 1] = sc[1];
+      strokeColor[ivpf3 + 2] = sc[2];
+      fillOpacity[ivpf] = fo;
+      fillColor[ivpf3] = fc[0];
+      fillColor[ivpf3 + 1] = fc[1];
+      fillColor[ivpf3 + 2] = fc[2];
+    }
+  });
+
+  gl.useProgram(gl._symbolShaderProgram);
+
+  if (!unitBuffer) {
+    unitBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, unitBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, unit, gl.STATIC_DRAW);
+    gl.vertexAttribPointer(gl._symbolUnitLocation, 2, gl.FLOAT, false, 0, 0);
+    gl.enableVertexAttribArray(gl._symbolUnitLocation);
+  } else {
+    gl.bindBuffer(gl.ARRAY_BUFFER, unitBuffer);
+    gl.vertexAttribPointer(gl._symbolUnitLocation, 2, gl.FLOAT, false, 0, 0);
+    gl.enableVertexAttribArray(gl._symbolUnitLocation);
+  }
+
+  posBuffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, posBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER, pos, gl.STATIC_DRAW);
+  gl.vertexAttribPointer(gl._symbolPosLocation, 3, gl.FLOAT, false, 0, 0);
+  gl.enableVertexAttribArray(gl._symbolPosLocation);
+
+  sizeBuffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, sizeBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER, size, gl.STATIC_DRAW);
+  gl.vertexAttribPointer(gl._symbolSizeLocation, 1, gl.FLOAT, false, 0, 0);
+  gl.enableVertexAttribArray(gl._symbolSizeLocation);
+
+  shapeBuffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, shapeBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER, shape, gl.STATIC_DRAW);
+  gl.vertexAttribPointer(gl._symbolShapeLocation, 1, gl.FLOAT, false, 0, 0);
+  gl.enableVertexAttribArray(gl._symbolShapeLocation);
+
+  strokeWidthBuffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, strokeWidthBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER, strokeWidth, gl.STATIC_DRAW);
+  gl.vertexAttribPointer(gl._symbolStrokeWidthLocation, 1, gl.FLOAT, false, 0, 0);
+  gl.enableVertexAttribArray(gl._symbolStrokeWidthLocation);
+
+  strokeOpacityBuffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, strokeOpacityBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER, strokeOpacity, gl.STATIC_DRAW);
+  gl.vertexAttribPointer(gl._symbolStrokeOpacityLocation, 1, gl.FLOAT, false, 0, 0);
+  gl.enableVertexAttribArray(gl._symbolStrokeOpacityLocation);
+
+  strokeColorBuffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, strokeColorBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER, strokeColor, gl.STATIC_DRAW);
+  gl.vertexAttribPointer(gl._symbolStrokeColorLocation, 3, gl.FLOAT, false, 0, 0);
+  gl.enableVertexAttribArray(gl._symbolStrokeColorLocation);
+
+  fillOpacityBuffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, fillOpacityBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER, fillOpacity, gl.STATIC_DRAW);
+  gl.vertexAttribPointer(gl._symbolFillOpacityLocation, 1, gl.FLOAT, false, 0, 0);
+  gl.enableVertexAttribArray(gl._symbolFillOpacityLocation);
+
+  fillColorBuffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, fillColorBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER, fillColor, gl.STATIC_DRAW);
+  gl.vertexAttribPointer(gl._symbolFillColorLocation, 3, gl.FLOAT, false, 0, 0);
+  gl.enableVertexAttribArray(gl._symbolFillColorLocation);
+
+  gl.uniformMatrix4fv(gl._symbolMatrixLocation, false, gl._matrix);
+  gl.uniform4fv(gl._symbolClipLocation, gl._clip);
+
+  gl.drawArrays(gl.TRIANGLES, 0, numPts * 3);
+
+  scene._symbolGeom = {
+    numPts: numPts,
+    unit: unit,
+    pos: pos,
+    size: size,
+    shape: shape,
+    strokeWidth: strokeWidth,
+    strokeOpacity: strokeOpacity,
+    strokeColor: strokeColor,
+    fillOpacity: fillOpacity,
+    fillColor: fillColor,
+    unitBuffer: unitBuffer,
+    posBuffer: posBuffer,
+    sizeBuffer: sizeBuffer,
+    shapeBuffer: shapeBuffer,
+    strokeWidthBuffer: strokeWidthBuffer,
+    strokeOpacityBuffer: strokeOpacityBuffer,
+    strokeColorBuffer: strokeColorBuffer,
+    fillOpacityBuffer: fillOpacityBuffer,
+    fillColorBuffer: fillColorBuffer
+  };
+}
+
+var symbol$1 = {
+  type:   'symbol',
+  tag:    'path',
+  nested: false,
+  attr:   attr$5,
+  bound:  bound$5,
+  draw:   drawAll(draw$4),
+  drawGL: drawGL$5,
+  pick:   pickPath(draw$4)
+};
 
 var context$1;
 
@@ -26425,7 +26825,7 @@ var textAlign = {
 
 var tempBounds = new Bounds();
 
-function attr$5(emit, item) {
+function attr$6(emit, item) {
   var dx = item.dx || 0,
       dy = (item.dy || 0) + offset(item),
       x = item.x || 0,
@@ -26450,7 +26850,7 @@ function attr$5(emit, item) {
   emit('transform', t);
 }
 
-function bound$5(bounds, item, noRotate) {
+function bound$6(bounds, item, noRotate) {
   var h = height(item),
       a = item.align,
       r = item.radius || 0,
@@ -26521,13 +26921,13 @@ function drawText(context, item, bounds) {
   return true;
 }
 
-function draw$4(context, scene, bounds) {
+function draw$5(context, scene, bounds) {
   visit(scene, function(item) {
     drawText(context, item, bounds);
   });
 }
 
-function drawGL$5(context, scene, bounds) {
+function drawGL$6(context, scene, bounds) {
   visit(scene, function(item) {
     drawText(context._textContext, item, bounds);
   });
@@ -26538,7 +26938,7 @@ function hit$1(context, item, x, y, gx, gy) {
   if (!item.angle) return true; // bounds sufficient if no rotation
 
   // project point into space of unrotated bounds
-  var b = bound$5(tempBounds, item, true),
+  var b = bound$6(tempBounds, item, true),
       a = -item.angle * Math.PI / 180,
       cos = Math.cos(a),
       sin = Math.sin(a),
@@ -26554,10 +26954,10 @@ var text$1 = {
   type:   'text',
   tag:    'text',
   nested: false,
-  attr:   attr$5,
-  bound:  bound$5,
-  draw:   draw$4,
-  drawGL: drawGL$5,
+  attr:   attr$6,
+  bound:  bound$6,
+  draw:   draw$5,
+  drawGL: drawGL$6,
   pick:   pick(hit$1)
 };
 
@@ -26942,6 +27342,8 @@ function WebGL$1(w, h) {
   gl._pathCacheSize = 0;
   gl._itemCache = {};
   gl._itemCacheSize = 0;
+  gl._shapeCache = {};
+  gl._shapeCacheSize = 0;
 
   gl._textCanvas = document.createElement('canvas');
   gl._textCanvas.width = w;
@@ -26964,9 +27366,11 @@ function WebGL$1(w, h) {
     'uniform float zFactor;' +
     'uniform vec2 offset;' +
     'varying vec4 vColor;' +
+    'varying vec4 vPosition;' +
     'void main(void) {' +
-       ' gl_Position = matrix * vec4(coordinates.x + offset.x, coordinates.y + offset.y, coordinates.z*zFactor - 1.0, 1.0);' +
-       ' vColor = color;' +
+    '  vPosition = vec4(coordinates.x + offset.x, coordinates.y + offset.y, coordinates.z*zFactor - 1.0, 1.0);' +
+    '  gl_Position = matrix * vPosition;' +
+    '  vColor = color;' +
     '}';
   var vertShader = gl.createShader(gl.VERTEX_SHADER);
   gl.shaderSource(vertShader, vertCode);
@@ -26978,8 +27382,13 @@ function WebGL$1(w, h) {
   var fragCode =
     'precision mediump float;' +
     'varying vec4 vColor;' +
+    'varying vec4 vPosition;' +
+    'uniform vec4 clip;' +
     'void main(void) {' +
-      ' gl_FragColor = vColor;' +
+    '  if (vPosition.x < clip[0] || vPosition.x > clip[2] || vPosition.y < clip[1] || vPosition.y > clip[3]) {' +
+    '    discard;' +
+    '  }' +
+    '  gl_FragColor = vColor;' +
     '}';
   var fragShader = gl.createShader(gl.FRAGMENT_SHADER);
   gl.shaderSource(fragShader, fragCode);
@@ -26999,6 +27408,7 @@ function WebGL$1(w, h) {
   gl._matrixLocation = gl.getUniformLocation(gl._shaderProgram, 'matrix');
   gl._zFactorLocation = gl.getUniformLocation(gl._shaderProgram, 'zFactor');
   gl._offsetLocation = gl.getUniformLocation(gl._shaderProgram, 'offset');
+  gl._clipLocation = gl.getUniformLocation(gl._shaderProgram, 'clip');
 
 // -------------------------------------------------------------------------
 // BEGIN: Adapted from https://github.com/greggman/webgl-fundamentals
@@ -27104,6 +27514,481 @@ function WebGL$1(w, h) {
 // END: Adapted from https://github.com/greggman/webgl-fundamentals
 // -------------------------------------------------------------------------
 
+  vertCode = [
+    'attribute vec3 pos;',
+    'attribute vec3 fillColor;',
+    'attribute vec3 strokeColor;',
+    'attribute float fillOpacity;',
+    'attribute float strokeWidth;',
+    'attribute float size;',
+    'attribute float shape;',
+    'attribute float strokeOpacity;',
+    'attribute vec2 unit;',
+    'uniform mat4 matrix;',
+    'varying vec4 positionVar;',
+    'varying vec4 fillColorVar;',
+    'varying vec4 strokeColorVar;',
+    'varying float sizeVar;',
+    'varying float shapeVar;',
+    'varying float strokeWidthVar;',
+    'varying vec2 unitVar;',
+    'void main(void)',
+    '{',
+    '  strokeWidthVar = strokeWidth;',
+    '  fillColorVar = vec4(fillColor, fillOpacity);',
+    '  strokeColorVar = vec4(strokeColor, strokeOpacity);',
+
+    // circle
+    '  if (shape == 0.0) {',
+    '    sizeVar = sqrt(size) / 2.0;',
+    '  }',
+
+    // cross
+    '  if (shape == 1.0) {',
+    '    sizeVar = sqrt(size) / 2.0;',
+    '  }',
+
+    // diamond
+    '  if (shape == 2.0) {',
+    '    sizeVar = sqrt(size) / 2.0;',
+    '  }',
+
+    // square
+    '  if (shape == 3.0) {',
+    '    sizeVar = sqrt(2.0) * sqrt(size) / 2.0;',
+    '  }',
+
+    // star
+    '  if (shape == 4.0) {',
+    '    sizeVar = sqrt(size) / 2.0;',
+    '  }',
+
+    // triangle-up
+    '  if (shape == 5.0) {',
+    '    sizeVar = (sqrt(6.0)/2.0) * sqrt(size) / 2.0;',
+    '  }',
+
+    // triangle-right
+    '  if (shape == 6.0) {',
+    '    sizeVar = (sqrt(6.0)/2.0) * sqrt(size) / 2.0;',
+    '  }',
+
+    // triangle-down
+    '  if (shape == 7.0) {',
+    '    sizeVar = (sqrt(6.0)/2.0) * sqrt(size) / 2.0;',
+    '  }',
+
+    // triangle-left
+    '  if (shape == 8.0) {',
+    '    sizeVar = (sqrt(6.0)/2.0) * sqrt(size) / 2.0;',
+    '  }',
+
+    // wye
+    '  if (shape == 9.0) {',
+    '    sizeVar = sqrt(size) / 2.0;',
+    '  }',
+
+    // '  sizeVar = size;',
+    '  shapeVar = shape;',
+    // '  float m = size + strokeWidth;',
+    '  float factor = (sizeVar + strokeWidth / 2.0 + 1.0) / sizeVar;',
+    '  unitVar = factor * unit;',
+    '  positionVar = vec4(pos.xy + factor * sizeVar * unit, -1.0, 1.0);',
+    '  gl_Position = matrix * positionVar;',
+    '}'
+  ].join('\n');
+  vertShader = gl.createShader(gl.VERTEX_SHADER);
+  gl.shaderSource(vertShader, vertCode);
+  gl.compileShader(vertShader);
+  if (!gl.getShaderParameter(vertShader, gl.COMPILE_STATUS)) {
+    console.log(gl.getShaderInfoLog(vertShader));
+  }
+
+  fragCode = [
+    'precision mediump float;',
+    'const float PI = 3.1415926535897932384626433832795;',
+    'varying vec4 positionVar;',
+    'varying vec4 fillColorVar;',
+    'varying vec4 strokeColorVar;',
+    'varying vec2 unitVar;',
+    'varying float sizeVar;',
+    'varying float shapeVar;',
+    'varying float strokeWidthVar;',
+    'uniform vec4 clip;',
+
+    'float distToLine(vec2 pt1, vec2 pt2, vec2 testPt)',
+    '{',
+    '  vec2 lineDir = pt2 - pt1;',
+    '  vec2 perpDir = vec2(lineDir.y, -lineDir.x);',
+    '  vec2 dirToPt1 = pt1 - testPt;',
+    '  return dot(normalize(perpDir), dirToPt1);',
+    '}',
+
+    'float distToAngle(vec2 apex, vec2 left, vec2 right, vec2 testPt)',
+    '{',
+    '  float dist = distToLine(apex, left, testPt);',
+    '  dist = min(dist, distToLine(right, apex, testPt));',
+    '  float cut = distToLine(left, right, testPt);',
+    '  if (cut < 0.0) return -1.0;',
+    '  return dist;',
+    '}',
+
+    'float distToHull(vec2 p1, vec2 p2, vec2 p3, vec2 p4, vec2 testPt)',
+    '{',
+    '  float dist = distToLine(p1, p2, testPt);',
+    '  dist = min(dist, distToLine(p2, p3, testPt));',
+    '  dist = min(dist, distToLine(p4, p1, testPt));',
+    '  float cut = distToLine(p3, p4, testPt);',
+    '  if (cut < 0.0) return -1.0;',
+    '  return dist;',
+    '}',
+
+    'vec2 rotate(vec2 pt, float a)',
+    '{',
+    '  return vec2(cos(a)*pt.x - sin(a)*pt.y, sin(a)*pt.x + cos(a)*pt.y);',
+    '}',
+
+    'void main () {',
+    '  if (positionVar.x < clip[0] || positionVar.x > clip[2] || positionVar.y < clip[1] || positionVar.y > clip[3]) {',
+    '    discard;',
+    '  }',
+
+    '  float dist;',
+    '  float d1;',
+    '  float d2;',
+
+    // circle
+    '  if (shapeVar == 0.0) {',
+    '    dist = length(unitVar);',
+    '  }',
+
+    // cross
+    '  if (shapeVar == 1.0) {',
+    '    float inset = 1.0 / 2.5;',
+    '    d1 = distToLine(vec2(-inset, -1.0), vec2(inset, -1.0), unitVar);',
+    '    d1 = min(d1, distToLine(vec2(inset, -1.0), vec2(inset, 1.0), unitVar));',
+    '    d1 = min(d1, distToLine(vec2(inset, 1.0), vec2(-inset, 1.0), unitVar));',
+    '    d1 = min(d1, distToLine(vec2(-inset, 1.0), vec2(-inset, -1.0), unitVar));',
+    '    d1 = 1.0 - d1;',
+    '    d2 = distToLine(vec2(1.0, -inset), vec2(1.0, inset), unitVar);',
+    '    d2 = min(d2, distToLine(vec2(1.0, inset), vec2(-1.0, inset), unitVar));',
+    '    d2 = min(d2, distToLine(vec2(-1.0, inset), vec2(-1.0, -inset), unitVar));',
+    '    d2 = min(d2, distToLine(vec2(-1.0, -inset), vec2(1.0, -inset), unitVar));',
+    '    d2 = 1.0 - d2;',
+    '    dist = min(d1, d2);',
+    '  }',
+
+    // diamond
+    '  if (shapeVar == 2.0) {',
+    '    dist = distToLine(vec2(0.0, -1.0), vec2(1.0, 0.0), unitVar);',
+    '    dist = min(dist, distToLine(vec2(1.0, 0.0), vec2(0.0, 1.0), unitVar));',
+    '    dist = min(dist, distToLine(vec2(0.0, 1.0), vec2(-1.0, 0.0), unitVar));',
+    '    dist = min(dist, distToLine(vec2(-1.0, 0.0), vec2(0.0, -1.0), unitVar));',
+    '    dist = 1.0 - dist;',
+    '  }',
+
+    // square
+    '  if (shapeVar == 3.0) {',
+    '    float side = sqrt(2.0)/2.0;',
+    '    dist = distToLine(vec2(-side, -side), vec2(side, -side), unitVar);',
+    '    dist = min(dist, distToLine(vec2(side, -side), vec2(side, side), unitVar));',
+    '    dist = min(dist, distToLine(vec2(side, side), vec2(-side, side), unitVar));',
+    '    dist = min(dist, distToLine(vec2(-side, side), vec2(-side, -side), unitVar));',
+    '    dist = 1.0 - dist;',
+    '  }',
+
+    // star
+    '  if (shapeVar == 4.0) {',
+    '    float h = 1.0;',
+    '    float x = h * tan(PI/10.0);',
+    '    vec2 p1 = vec2(0.0, -h);',
+    '    vec2 p2 = vec2(x, 0);',
+    '    vec2 p3 = vec2(-x, 0);',
+    '    float angle = 0.0;',
+    '    dist = 1.0 - distToAngle(rotate(p1, angle), rotate(p2, angle), rotate(p3, angle), unitVar);',
+    '    angle = angle + 2.0*PI/5.0;',
+    '    dist = min(dist, 1.0 - distToAngle(rotate(p1, angle), rotate(p2, angle), rotate(p3, angle), unitVar));',
+    '    angle = angle + 2.0*PI/5.0;',
+    '    dist = min(dist, 1.0 - distToAngle(rotate(p1, angle), rotate(p2, angle), rotate(p3, angle), unitVar));',
+    '    angle = angle + 2.0*PI/5.0;',
+    '    dist = min(dist, 1.0 - distToAngle(rotate(p1, angle), rotate(p2, angle), rotate(p3, angle), unitVar));',
+    '    angle = angle + 2.0*PI/5.0;',
+    '    dist = min(dist, 1.0 - distToAngle(rotate(p1, angle), rotate(p2, angle), rotate(p3, angle), unitVar));',
+    '  }',
+
+    // triangle-up
+    '  if (shapeVar == 5.0) {',
+    '    vec2 p1 = vec2(0.0, -sqrt(2.0)/2.0);',
+    '    vec2 p2 = vec2(sqrt(6.0)/3.0, sqrt(2.0)/2.0);',
+    '    vec2 p3 = vec2(-sqrt(6.0)/3.0, sqrt(2.0)/2.0);',
+    '    dist = distToLine(p1, p2, unitVar);',
+    '    dist = min(dist, distToLine(p2, p3, unitVar));',
+    '    dist = min(dist, distToLine(p3, p1, unitVar));',
+    '    dist = 1.0 - dist;',
+    '  }',
+
+    // triangle-right
+    '  if (shapeVar == 6.0) {',
+    '    vec2 p1 = vec2(sqrt(2.0)/2.0, 0.0);',
+    '    vec2 p2 = vec2(-sqrt(2.0)/2.0, sqrt(6.0)/3.0);',
+    '    vec2 p3 = vec2(-sqrt(2.0)/2.0, -sqrt(6.0)/3.0);',
+    '    dist = distToLine(p1, p2, unitVar);',
+    '    dist = min(dist, distToLine(p2, p3, unitVar));',
+    '    dist = min(dist, distToLine(p3, p1, unitVar));',
+    '    dist = 1.0 - dist;',
+    '  }',
+
+    // triangle-down
+    '  if (shapeVar == 7.0) {',
+    '    vec2 p1 = vec2(0.0, sqrt(2.0)/2.0);',
+    '    vec2 p2 = vec2(-sqrt(6.0)/3.0, -sqrt(2.0)/2.0);',
+    '    vec2 p3 = vec2(sqrt(6.0)/3.0, -sqrt(2.0)/2.0);',
+    '    dist = distToLine(p1, p2, unitVar);',
+    '    dist = min(dist, distToLine(p2, p3, unitVar));',
+    '    dist = min(dist, distToLine(p3, p1, unitVar));',
+    '    dist = 1.0 - dist;',
+    '  }',
+
+    // triangle-left
+    '  if (shapeVar == 8.0) {',
+    '    vec2 p1 = vec2(-sqrt(2.0)/2.0, 0.0);',
+    '    vec2 p2 = vec2(sqrt(2.0)/2.0, -sqrt(6.0)/3.0);',
+    '    vec2 p3 = vec2(sqrt(2.0)/2.0, sqrt(6.0)/3.0);',
+    '    dist = distToLine(p1, p2, unitVar);',
+    '    dist = min(dist, distToLine(p2, p3, unitVar));',
+    '    dist = min(dist, distToLine(p3, p1, unitVar));',
+    '    dist = 1.0 - dist;',
+    '  }',
+
+    // wye
+    '  if (shapeVar == 9.0) {',
+    '    float h = 12.0 / (12.0 + sqrt(12.0));',
+    '    float y = h / sqrt(12.0) + h;',
+    '    vec2 p1 = vec2(h / 2.0, y);',
+    '    vec2 p2 = vec2(-h / 2.0, y);',
+    '    vec2 p3 = vec2(-h / 2.0, 0.0);',
+    '    vec2 p4 = vec2(h / 2.0, 0.0);',
+    '    float angle = 0.0;',
+    '    dist = 1.0 - distToHull(p1, p2, p3, p4, unitVar);',
+    '    angle = angle + 2.0*PI/3.0;',
+    '    dist = min(dist, 1.0 - distToHull(rotate(p1, angle), rotate(p2, angle), rotate(p3, angle), rotate(p4, angle), unitVar));',
+    '    angle = angle + 2.0*PI/3.0;',
+    '    dist = min(dist, 1.0 - distToHull(rotate(p1, angle), rotate(p2, angle), rotate(p3, angle), rotate(p4, angle), unitVar));',
+    '  }',
+
+    '  float endStep = 1.0;',
+    '  float antialiasDist = 1.0 / sizeVar / 2.0;',
+    '  float widthDist = strokeWidthVar / sizeVar / 2.0;',
+    '  vec4 c1;',
+    '  vec4 c2;',
+    '  float step;',
+    '  if (dist < endStep) {',
+    '    step = smoothstep(endStep - widthDist - antialiasDist, endStep - widthDist + antialiasDist, dist);',
+    '    if (fillColorVar.a > 0.0) {',
+    '      c1 = fillColorVar;',
+    '    } else {',
+    '      c1 = vec4(strokeColorVar.rgb, 0.0);',
+    '    }',
+    '    if (strokeColorVar.a > 0.0) {',
+    '      c2 = strokeColorVar;',
+    '    } else {',
+    '      c2 = vec4(fillColorVar.rgb, 0.0);',
+    '    }',
+    '  } else {',
+    '    step = smoothstep(endStep + widthDist - antialiasDist, endStep + widthDist + antialiasDist, dist);',
+    '    if (strokeColorVar.a > 0.0) {',
+    '      c1 = strokeColorVar;',
+    '      c2 = vec4(strokeColorVar.rgb, 0.0);',
+    '    } else {',
+    '      c1 = vec4(fillColorVar.rgb, 0.0);',
+    '      c2 = vec4(fillColorVar.rgb, 0.0);',
+    '    }',
+    '  }',
+    '  gl_FragColor = mix(c1, c2, step);',
+    '}'
+  ].join('\n');
+  fragShader = gl.createShader(gl.FRAGMENT_SHADER);
+  gl.shaderSource(fragShader, fragCode);
+  gl.compileShader(fragShader);
+  if (!gl.getShaderParameter(fragShader, gl.COMPILE_STATUS)) {
+    console.log(gl.getShaderInfoLog(fragShader));
+  }
+
+  shaderProgram = gl.createProgram();
+  gl.attachShader(shaderProgram, vertShader);
+  gl.attachShader(shaderProgram, fragShader);
+  gl.linkProgram(shaderProgram);
+
+  gl._symbolShaderProgram = shaderProgram;
+  gl._symbolPosLocation = gl.getAttribLocation(shaderProgram, 'pos');
+  gl._symbolFillColorLocation = gl.getAttribLocation(shaderProgram, 'fillColor');
+  gl._symbolStrokeColorLocation = gl.getAttribLocation(shaderProgram, 'strokeColor');
+  gl._symbolFillOpacityLocation = gl.getAttribLocation(shaderProgram, 'fillOpacity');
+  gl._symbolStrokeWidthLocation = gl.getAttribLocation(shaderProgram, 'strokeWidth');
+  gl._symbolSizeLocation = gl.getAttribLocation(shaderProgram, 'size');
+  gl._symbolShapeLocation = gl.getAttribLocation(shaderProgram, 'shape');
+  gl._symbolStrokeOpacityLocation = gl.getAttribLocation(shaderProgram, 'strokeOpacity');
+  gl._symbolUnitLocation = gl.getAttribLocation(shaderProgram, 'unit');
+  gl._symbolMatrixLocation = gl.getUniformLocation(shaderProgram, 'matrix');
+  gl._symbolClipLocation = gl.getUniformLocation(shaderProgram, 'clip');
+
+  // rect shader
+
+  vertCode = [
+    'attribute vec3 pos;',
+    'attribute vec3 fillColor;',
+    'attribute vec3 strokeColor;',
+    'attribute float fillOpacity;',
+    'attribute float strokeWidth;',
+    'attribute float strokeOpacity;',
+    'attribute float cornerRadius;',
+    'attribute vec2 size;',
+    'attribute vec2 unit;',
+    'uniform mat4 matrix;',
+    'varying vec4 fillColorVar;',
+    'varying vec4 strokeColorVar;',
+    'varying float strokeWidthVar;',
+    'varying float cornerRadiusVar;',
+    'varying float factorVar;',
+    'varying vec2 sizeVar;',
+    'varying vec2 unitVar;',
+    'varying vec4 positionVar;',
+    'void main(void)',
+    '{',
+    '  strokeWidthVar = strokeWidth;',
+    '  fillColorVar = vec4(fillColor, fillOpacity);',
+    '  strokeColorVar = vec4(strokeColor, strokeOpacity);',
+    '  cornerRadiusVar = cornerRadius;',
+    '  sizeVar = size;',
+    '  unitVar = unit;',
+    '  factorVar = max(size.x, size.y) + strokeWidth + 1.0;',
+    '  positionVar = vec4(pos.xy + factorVar*unitVar - 0.5*strokeWidth - 0.5, -1.0, 1.0);',
+    '  gl_Position = matrix * positionVar;',
+    '}'
+  ].join('\n');
+  vertShader = gl.createShader(gl.VERTEX_SHADER);
+  gl.shaderSource(vertShader, vertCode);
+  gl.compileShader(vertShader);
+  if (!gl.getShaderParameter(vertShader, gl.COMPILE_STATUS)) {
+    console.log(gl.getShaderInfoLog(vertShader));
+  }
+
+  fragCode = [
+    'precision mediump float;',
+    'const float PI = 3.1415926535897932384626433832795;',
+    'varying vec4 fillColorVar;',
+    'varying vec4 strokeColorVar;',
+    'varying float strokeWidthVar;',
+    'varying float cornerRadiusVar;',
+    'varying float factorVar;',
+    'varying vec2 unitVar;',
+    'varying vec2 sizeVar;',
+    'varying vec4 positionVar;',
+    'uniform vec4 clip;',
+
+    'float distToLine(vec2 pt1, vec2 pt2, vec2 testPt)',
+    '{',
+    '  vec2 lineDir = pt2 - pt1;',
+    '  vec2 perpDir = vec2(lineDir.y, -lineDir.x);',
+    '  vec2 dirToPt1 = pt1 - testPt;',
+    '  return dot(normalize(perpDir), dirToPt1);',
+    '}',
+
+    'float cornerDist(vec2 pt, float radius, float xdir, float ydir, vec2 testPt)',
+    '{',
+    '  if (xdir * (pt.x - testPt.x) > 0.0) return 1.0;',
+    '  if (ydir * (pt.y - testPt.y) > 0.0) return 1.0;',
+    '  return radius - length(pt - testPt);',
+    '}',
+
+    'void main () {',
+    '  if (positionVar.x < clip[0] || positionVar.x > clip[2] || positionVar.y < clip[1] || positionVar.y > clip[3]) {',
+    '    discard;',
+    '  }',
+    '  float delta = (0.5 + 0.5*strokeWidthVar)/factorVar;',
+    '  float xmax = (0.5 + 0.5*strokeWidthVar + sizeVar.x)/factorVar;',
+    '  float ymax = (0.5 + 0.5*strokeWidthVar + sizeVar.y)/factorVar;',
+    '  vec2 p1 = vec2(delta, delta);',
+    '  vec2 p2 = vec2(xmax, delta);',
+    '  vec2 p3 = vec2(xmax, ymax);',
+    '  vec2 p4 = vec2(delta, ymax);',
+    '  float dist = distToLine(p1, p2, unitVar);',
+    '  dist = min(dist, distToLine(p2, p3, unitVar));',
+    '  dist = min(dist, distToLine(p3, p4, unitVar));',
+    '  dist = min(dist, distToLine(p4, p1, unitVar));',
+
+    '  if (cornerRadiusVar > 0.0) {',
+    '    delta = (0.5 + 0.5*strokeWidthVar + cornerRadiusVar)/factorVar;',
+    '    xmax = (0.5 + 0.5*strokeWidthVar + sizeVar.x - cornerRadiusVar)/factorVar;',
+    '    ymax = (0.5 + 0.5*strokeWidthVar + sizeVar.y - cornerRadiusVar)/factorVar;',
+    '    p1 = vec2(delta, delta);',
+    '    p2 = vec2(xmax, delta);',
+    '    p3 = vec2(xmax, ymax);',
+    '    p4 = vec2(delta, ymax);',
+    '    dist = min(dist, cornerDist(p1, cornerRadiusVar/factorVar, -1.0, -1.0, unitVar));',
+    '    dist = min(dist, cornerDist(p2, cornerRadiusVar/factorVar, 1.0, -1.0, unitVar));',
+    '    dist = min(dist, cornerDist(p3, cornerRadiusVar/factorVar, 1.0, 1.0, unitVar));',
+    '    dist = min(dist, cornerDist(p4, cornerRadiusVar/factorVar, -1.0, 1.0, unitVar));',
+    '  }',
+
+    '  dist = 1.0 - dist;',
+
+    '  float endStep = 1.0;',
+    '  float antialiasDist = 0.5 / factorVar;',
+    '  float widthDist = 0.5*strokeWidthVar / factorVar;',
+    '  vec4 c1;',
+    '  vec4 c2;',
+    '  float step;',
+    '  if (dist < endStep) {',
+    '    step = smoothstep(endStep - widthDist - antialiasDist, endStep - widthDist + antialiasDist, dist);',
+    '    if (fillColorVar.a > 0.0) {',
+    '      c1 = fillColorVar;',
+    '    } else {',
+    '      c1 = vec4(strokeColorVar.rgb, 0.0);',
+    '    }',
+    '    if (strokeWidthVar > 0.0) {',
+    '      c2 = strokeColorVar;',
+    '    } else {',
+    '      c2 = vec4(fillColorVar.rgb, 0.0);',
+    '    }',
+    '  } else {',
+    '    step = smoothstep(endStep + widthDist - antialiasDist, endStep + widthDist + antialiasDist, dist);',
+    '    if (strokeWidthVar > 0.0) {',
+    '      c1 = strokeColorVar;',
+    '      c2 = vec4(strokeColorVar.rgb, 0.0);',
+    '    } else {',
+    '      c1 = vec4(fillColorVar.rgb, 0.0);',
+    '      c2 = vec4(fillColorVar.rgb, 0.0);',
+    '    }',
+    '  }',
+    '  gl_FragColor = mix(c1, c2, step);',
+    '}'
+  ].join('\n');
+  fragShader = gl.createShader(gl.FRAGMENT_SHADER);
+  gl.shaderSource(fragShader, fragCode);
+  gl.compileShader(fragShader);
+  if (!gl.getShaderParameter(fragShader, gl.COMPILE_STATUS)) {
+    console.log(gl.getShaderInfoLog(fragShader));
+  }
+
+  shaderProgram = gl.createProgram();
+  gl.attachShader(shaderProgram, vertShader);
+  gl.attachShader(shaderProgram, fragShader);
+  gl.linkProgram(shaderProgram);
+
+  gl._rectShaderProgram = shaderProgram;
+  gl._rectPosLocation = gl.getAttribLocation(shaderProgram, 'pos');
+  gl._rectFillColorLocation = gl.getAttribLocation(shaderProgram, 'fillColor');
+  gl._rectStrokeColorLocation = gl.getAttribLocation(shaderProgram, 'strokeColor');
+  gl._rectFillOpacityLocation = gl.getAttribLocation(shaderProgram, 'fillOpacity');
+  gl._rectStrokeWidthLocation = gl.getAttribLocation(shaderProgram, 'strokeWidth');
+  gl._rectSizeLocation = gl.getAttribLocation(shaderProgram, 'size');
+  gl._rectStrokeOpacityLocation = gl.getAttribLocation(shaderProgram, 'strokeOpacity');
+  gl._rectCornerRadiusLocation = gl.getAttribLocation(shaderProgram, 'cornerRadius');
+  gl._rectUnitLocation = gl.getAttribLocation(shaderProgram, 'unit');
+  gl._rectMatrixLocation = gl.getUniformLocation(shaderProgram, 'matrix');
+  gl._rectClipLocation = gl.getUniformLocation(shaderProgram, 'clip');
+
   return canvas;
 }
 
@@ -27141,6 +28026,7 @@ function resize$1(canvas, width, height, origin) {
 
   gl._origin = origin;
   gl._ratio = ratio;
+  gl._clip = [0, 0, canvas.width / gl._ratio, canvas.height / gl._ratio];
 
   return canvas;
 }
@@ -27243,13 +28129,15 @@ prototype$62._updateUniforms = function() {
     0, 0, 0, 1
   ];
 
-  this.matrix = multiply(this.matrix, perspective(Math.PI/2, width/height, 0.1, 3000));
+  this.matrix = multiply(this.matrix, perspective(Math.PI/2, width/height, 0.01, 3000));
   this.matrix = multiply(this.matrix, translateGL(this._translateX, this._translateY, (this._translateZ - 1)*height/width));
   this.matrix = multiply(this.matrix, rotateZ(this._angleZ));
   this.matrix = multiply(this.matrix, rotateY(this._angleY));
   this.matrix = multiply(this.matrix, rotateX(this._angleX));
   this.matrix = multiply(this.matrix, translateGL(0, 0, 1));
   this.matrix = multiply(this.matrix, smooshMatrix);
+
+  gl._matrix = this.matrix;
 
   gl.uniform1f(gl._zFactorLocation, this._zFactor);
   gl.uniformMatrix4fv(gl._matrixLocation, false, this.matrix);
@@ -27273,6 +28161,12 @@ prototype$62._render = function(scene, items) {
   }
   gl._images = [];
   gl._randomZ = this._randomZ;
+  gl._pathCacheHit = 0;
+  gl._pathCacheMiss = 0;
+  gl._itemCacheHit = 0;
+  gl._itemCacheMiss = 0;
+  gl._shapeCacheHit = 0;
+  gl._shapeCacheMiss = 0;
 
   b = (!items || this._redraw)
     ? (this._redraw = false, null)
@@ -27281,6 +28175,10 @@ prototype$62._render = function(scene, items) {
   if (items) {
     for (i = 0; i < items.length; i++) {
       items[i]._dirty = true;
+      if (items[i].exit && marks[items[i].mark.marktype].nested && items[i].mark.items.length) {
+        // Mark an item as dirty to force redraw of the nested mark
+        items[i].mark.items[0]._dirty = true;
+      }
     }
   } else {
     gl._fullRedraw = true;
@@ -27317,6 +28215,13 @@ prototype$62._render = function(scene, items) {
   gl._fullRedraw = false;
   this._lastScene = scene;
 
+  // console.log('Path cache hit: ' + gl._pathCacheHit);
+  // console.log('Path cache miss: ' + gl._pathCacheMiss);
+  // console.log('Item cache hit: ' + gl._itemCacheHit);
+  // console.log('Item cache miss: ' + gl._itemCacheMiss);
+  // console.log('Shape cache hit: ' + gl._shapeCacheHit);
+  // console.log('Shape cache miss: ' + gl._shapeCacheMiss);
+
   return this;
 };
 
@@ -27332,6 +28237,11 @@ prototype$62.draw = function(ctx, scene, bounds) {
   if (mark.drawGL) {
     mark.drawGL.call(this, ctx, scene, bounds);
   }
+};
+
+prototype$62.toDataURL = function(scene) {
+  this.render(scene, null);
+  return this.canvas().toDataURL("image/png", 1);
 };
 
 prototype$62.clear = function(x, y, w, h) {

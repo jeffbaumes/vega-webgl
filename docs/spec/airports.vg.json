@@ -166,11 +166,10 @@
       "from": {"data": "airports"},
       "encode": {
         "enter": {
-          "size": {"scale": "size", "field": "traffic.flights"},
+          "size": {"value": 255},
           "fill": {"value": "steelblue"},
           "fillOpacity": {"value": 0.8},
-          "stroke": {"value": "white"},
-          "strokeWidth": {"value": 1.5}
+          "shape": {"value": "cross"}
         },
         "update": {
           "x": {"field": "x"},
