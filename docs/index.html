@@ -15,7 +15,7 @@
   <body>
     <div>
       <h3>
-        Experimental WebGL renderer for Vega (above), compared with 2DCanvas (below)
+        Experimental WebGL renderer for Vega
       </h3>
       <div>
         <a href="https://github.com/jeffbaumes/vega-webgl">Code</a>
@@ -74,11 +74,17 @@
         <option value="weather">weather</option>
         <option value="wordcloud">wordcloud</option>
       </select>
-      <input type="checkbox" id="rotate">rotate</input>
-      <input type="checkbox" id="bounce">bounce</input>
+      <select id="renderer">
+        <option value="webgl">webgl</option>
+        <option value="canvas">canvas</option>
+        <option value="svg">svg</option>
+      </select>
+      <span id="webgl-controls">
+        <input type="checkbox" id="rotate">rotate</input>
+        <input type="checkbox" id="bounce">bounce</input>
+      </span>
     </div>
     <div id="vis"></div>
-    <div id="vis2"></div>
   </body>
 <script type="text/javascript">
 // parse a spec and create a visualization view
@@ -113,6 +119,8 @@ var frameId = null;
 var bounce = false;
 var rotate = false;
 var animating = false;
+var renderer = document.querySelector('#renderer').value;
+var specName = document.querySelector('#spec').value;
 
 function step(timestamp) {
   if (!start) start = timestamp;
@@ -132,7 +140,7 @@ function updateAnimation() {
   if (!(rotate || bounce) && animating) {
     window.cancelAnimationFrame(frameId);
     start = null;
-    if (view) {
+    if (view && renderer === 'webgl') {
       view._renderer.depthTest(false).translate(0, 0, 0).rotate(0, 0, 0).zFactor(0);
       view._renderer.frame();
     }
@@ -143,32 +151,41 @@ function updateAnimation() {
   };
 }
 
-function load(name) {
-  fetch('spec/' + name + '.vg.json')
+function load() {
+  fetch('spec/' + specName + '.vg.json')
       .then(function(response) { return response.json(); })
       .then(function(spec) {
-
-        var runtime2 = vega.parse(spec);
-        var view2 = new vega.View(runtime2)
-          .logLevel(vega.Warn) // set view logging level
-          .initialize(document.querySelector('#vis2')) // set parent DOM element
-          .hover() // enable hover event processing
-          .run(); // update and render the view
-
         var runtime = vega.parse(spec);
         view = new vega.View(runtime)
           .logLevel(vega.Warn) // set view logging level
           .initialize(document.querySelector('#vis')) // set parent DOM element
-          .renderer('webgl') // set render type (defaults to 'canvas')
+          .renderer(renderer) // set render type (defaults to 'canvas')
           .hover(); // enable hover event processing
 
-        view._renderer.randomZ(true);
+        if (renderer === 'webgl') {
+          view._renderer.randomZ(true);
+          document.querySelector('#webgl-controls').style.display = 'inline';
+        } else {
+          document.querySelector('#rotate').checked = false;
+          document.querySelector('#bounce').checked = false;
+          rotate = false;
+          bounce = false;
+          updateAnimation();
+          document.querySelector('#webgl-controls').style.display = 'none';
+        }
+
         view.run();
       });
 }
 
 document.querySelector('#spec').addEventListener('change', function (e) {
-  load(e.target.value);
+  specName = e.target.value;
+  load();
+});
+
+document.querySelector('#renderer').addEventListener('change', function (e) {
+  renderer = e.target.value;
+  load();
 });
 
 document.querySelector('#rotate').addEventListener('change', function (e) {
@@ -181,7 +198,7 @@ document.querySelector('#bounce').addEventListener('change', function (e) {
   updateAnimation();
 });
 
-load(document.querySelector('#spec').value);
+load();
 updateAnimation();
 
 </script>
